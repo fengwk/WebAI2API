@@ -121,6 +121,24 @@ docker run -d --name webai-2api \
 docker-compose up -d
 ```
 
+### Docker 分支自动发布到 Docker Hub
+
+仓库内置 GitHub Actions 工作流：当 `docker` 分支有新的 push 时，会自动构建并推送 Docker 镜像到 Docker Hub。
+
+需要提前在 GitHub 仓库中配置：
+
+- `DOCKERHUB_USERNAME` 或 `DOCKER_USERNAME`（secret）
+- `DOCKERHUB_TOKEN` 或 `DOCKER_PASSWORD`（secret）
+- `DOCKERHUB_NAMESPACE`（variable，可选；未设置时默认使用用户名）
+
+默认会推送以下标签：
+
+- `docker`
+- `latest`
+- `sha-<commit>`
+
+当前工作流会构建 `linux/amd64` 与 `linux/arm64` 两种架构镜像。
+
 ---
 
 ## ⚡ 快速开始
