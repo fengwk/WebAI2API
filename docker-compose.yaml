@@ -1,6 +1,6 @@
 services:
   webai-2api:
-    image: foxhui/webai-2api:latest
+    image: fengwk/webai-2api:latest
     container_name: webai-2api
     restart: unless-stopped
     ports:
