@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. 复制依赖文件、脚本和补丁目录，然后安装
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY scripts/ ./scripts/
 COPY patches/ ./patches/
 RUN npm install -g pnpm && pnpm install --frozen-lockfile
