@@ -647,17 +647,15 @@ export function createAdminRouter(context) {
                 const artifactDir = path.join(getDebugArtifactsRoot(tempDir), runId);
                 const artifactBasePath = `/admin/debug/artifacts/${encodeURIComponent(runId)}`;
 
-                try {
-                    const result = await poolContext.poolManager.runDebugScript(
-                        workerName,
-                        script,
-                        input,
-                        { id: runId, debug: true },
-                        { keepPageOpen, timeout, artifactDir, artifactBasePath }
-                    );
-                    result.runId = runId;
-                    sendJson(res, 200, result);
-                }
+                const result = await poolContext.poolManager.runDebugScript(
+                    workerName,
+                    script,
+                    input,
+                    { id: runId, debug: true },
+                    { keepPageOpen, timeout, artifactDir, artifactBasePath }
+                );
+                result.runId = runId;
+                sendJson(res, 200, result);
                 return;
             }
 
