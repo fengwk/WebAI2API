@@ -10,8 +10,11 @@ async function waitForInput(page, timeout = 30000) {
   return textbox;
 }
 
-async function uploadFiles(page, imagePaths) {
-  if (!imagePaths?.length) return;
+async function uploadFiles(page, images) {
+  if (!images?.length) return;
+
+  const imagePaths = images.map(image => image.path).filter(Boolean);
+  if (imagePaths.length === 0) return;
 
   const menuBtn = page.getByRole('button', { name: 'Open upload file menu' });
   await menuBtn.click({ timeout: 10000 });
@@ -24,18 +27,19 @@ async function uploadFiles(page, imagePaths) {
   await chooser.setFiles(imagePaths);
 }
 
-async function downloadAsDataUrl(page, url, timeout = 120000) {
-  const resp = await page.request.get(url, { timeout });
+async function downloadImage(api, page, url) {
+  const resp = await page.request.get(url, { timeout: 120000 });
   if (!resp.ok()) {
     throw new Error(`图片下载失败: HTTP ${resp.status()}`);
   }
   const buffer = await resp.body();
   const contentType = resp.headers()['content-type'] || 'image/png';
   const mimeType = contentType.split(';')[0].trim();
-  return {
-    image: `data:${mimeType};base64,${buffer.toString('base64')}`,
-    imageUrl: url
-  };
+  return await api.saveFile({
+    relativePath: 'gemini/result.png',
+    content: buffer,
+    mimeType
+  });
 }
 
 function parseLenFramedResponse(buf) {
@@ -147,46 +151,47 @@ function extractAiTextFromResponse(buf) {
   }
 }
 
+function buildPrompt(input) {
+  const prompt = String(input.prompt || '').trim();
+  const size = String(input.size || '').trim();
+  if (!size) return prompt;
+  return `${prompt}\n\n将宽高比设置为 ${size}`;
+}
+
 export const manifest = {
-  id: 'gemini_image',
-  displayName: 'Gemini Image',
-  description: 'Gemini 图片生成动态适配器，默认目标模型为 gemini-3-pro-image-preview。',
-  models: [
-    { id: 'gemini-3-pro-image-preview', imagePolicy: 'optional', type: 'image' }
-  ],
+  id: 'gemini_image_generate',
+  name: 'Gemini Image Generate',
+  provider: {
+    type: 'openai-images-generations',
+    models: ['gemini-3-pro-image-preview']
+  },
   navigationHandlers: [],
   getTargetUrl() {
     return TARGET_URL;
   },
-
-  async generate(ctx, prompt, imagePaths, modelId, meta) {
+  async execute(ctx, input) {
     const { page, api, config } = ctx;
     const waitTimeout = config?.backend?.pool?.waitTimeout ?? 300000;
+    const prompt = buildPrompt(input);
+    const images = input.images || [];
 
-    api.log('info', '打开 Gemini 页面', { modelId, promptLength: prompt.length, imageCount: imagePaths.length, ...meta });
+    api.log('info', '打开 Gemini 页面', {
+      model: input.model,
+      promptLength: prompt.length,
+      imageCount: images.length
+    });
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-    const useTempChat = config?.backend?.adapter?.gemini?.temporaryChat || false;
-    if (useTempChat) {
-      try {
-        await page.getByRole('button', { name: 'Temporary chat' }).click({ timeout: 3000 });
-      } catch {
-        // ignore
-      }
-    }
 
     const inputLocator = await waitForInput(page);
     await sleep(500);
 
-    if (imagePaths.length > 0) {
-      api.log('info', '开始上传参考图片', { count: imagePaths.length, ...meta });
-      await uploadFiles(page, imagePaths);
+    if (images.length > 0) {
+      await uploadFiles(page, images);
       await sleep(3000);
     }
 
     await page.getByRole('button', { name: 'Tools' }).click({ timeout: 10000 });
     await page.getByRole('menuitemcheckbox', { name: 'Create image' }).click({ timeout: 10000 });
-
     await inputLocator.click({ timeout: 10000 });
     await page.keyboard.insertText(prompt);
 
@@ -194,23 +199,42 @@ export const manifest = {
       return response.url().includes('assistant.lamda.BardFrontendService/StreamGenerate') && response.request().method() === 'POST';
     }, { timeout: waitTimeout });
 
-    api.log('info', '发送提示词', meta);
     await page.getByRole('button', { name: 'Send message' }).click({ timeout: 10000 });
-
     const streamResponse = await responsePromise;
     if (!streamResponse.ok()) {
-      return { error: `API 返回错误: HTTP ${streamResponse.status()}` };
+      return {
+        success: false,
+        error: {
+          message: `API 返回错误: HTTP ${streamResponse.status()}`,
+          retryable: true
+        }
+      };
     }
 
     const bodyBuffer = await streamResponse.body();
     const imageUrls = extractImageUrlsFromResponse(bodyBuffer);
     if (imageUrls.length === 0) {
       const text = extractAiTextFromResponse(bodyBuffer);
-      return { error: text ? text.substring(0, 200) : '响应中未找到图片结果' };
+      return {
+        success: false,
+        error: {
+          message: text ? text.substring(0, 200) : '响应中未找到图片结果',
+          retryable: false
+        }
+      };
     }
 
-    const imageUrl = `${imageUrls[0]}=d-I`;
-    api.log('info', '开始下载 Gemini 图片', { imageUrl, ...meta });
-    return await downloadAsDataUrl(page, imageUrl);
+    const file = await downloadImage(api, page, `${imageUrls[0]}=d-I`);
+    return {
+      success: true,
+      data: {
+        created: Math.floor(Date.now() / 1000),
+        images: [
+          {
+            file
+          }
+        ]
+      }
+    };
   }
 };

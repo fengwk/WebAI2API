@@ -12,21 +12,14 @@ const testing = ref(false);
 
 const selectedAdapterId = ref('');
 const sourceCode = ref('');
-
 const createVisible = ref(false);
 const newAdapterId = ref('');
-const testImages = ref([]);
-
-const testForm = ref({
-    workerName: '',
-    modelId: '',
-    prompt: 'test'
-});
-
+const testWorkerName = ref('');
+const testInput = ref({});
 const testResult = ref(null);
 
 const adapters = computed(() => settingsStore.adaptersMeta);
-const selectedAdapter = computed(() => adapters.value.find(a => a.id === selectedAdapterId.value) || null);
+const selectedAdapter = computed(() => adapters.value.find(item => item.id === selectedAdapterId.value) || null);
 const availableWorkers = computed(() => {
     const workers = [];
     for (const instance of settingsStore.workerConfig || []) {
@@ -41,29 +34,90 @@ const availableWorkers = computed(() => {
 });
 
 function buildTemplate(adapterId) {
-    return `export const manifest = {
+    return `const TARGET_URL = 'https://example.com';
+
+export const manifest = {
   id: '${adapterId}',
-  displayName: '${adapterId}',
-  description: 'dynamic adapter',
-  models: [
-    { id: '${adapterId}-model', imagePolicy: 'optional', type: 'image' }
-  ],
+  name: '${adapterId}',
+  provider: {
+    type: 'openai-images-generations',
+    models: ['gpt-image-2']
+  },
   navigationHandlers: [],
-
-  async generate(ctx, prompt, imagePaths, modelId, meta) {
-    const { page, context, api } = ctx;
-
-    api.log('info', '开始执行动态适配器', { modelId, promptLength: prompt.length, imageCount: imagePaths.length });
-
-    await page.goto('https://example.com');
-
-    return { error: '请编辑脚本后再测试' };
+  getTargetUrl() {
+    return TARGET_URL;
+  },
+  async execute(ctx, input) {
+    const { page, api } = ctx;
+    api.log('info', '开始执行动态适配器', {
+      providerType: 'openai-images-generations',
+      model: input.model,
+      promptLength: String(input.prompt || '').length
+    });
+    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });
+    return {
+      success: false,
+      error: {
+        message: '请编辑脚本后再测试',
+        retryable: false
+      }
+    };
   }
 };
 `;
 }
 
-const fileToBase64 = (file) => {
+function cloneValue(value) {
+    return JSON.parse(JSON.stringify(value));
+}
+
+function buildInitialInput(adapter) {
+    const initial = {};
+    const fields = adapter?.inputSchema?.fields || [];
+    for (const field of fields) {
+        if (field.type === 'file') {
+            initial[field.key] = field.multiple === false ? null : [];
+            continue;
+        }
+        if (field.defaultValue !== undefined) {
+            initial[field.key] = cloneValue(field.defaultValue);
+            continue;
+        }
+        if (field.key === 'model') {
+            initial[field.key] = adapter?.models?.[0] || '';
+            continue;
+        }
+        if (field.type === 'switch') {
+            initial[field.key] = false;
+            continue;
+        }
+        initial[field.key] = '';
+    }
+    return initial;
+}
+
+function resetTestInput(adapter) {
+    testInput.value = buildInitialInput(adapter);
+    testResult.value = null;
+}
+
+function getFieldOptions(field) {
+    if (Array.isArray(field.options) && field.options.length > 0) {
+        return field.options;
+    }
+    if (field.key === 'model') {
+        return (selectedAdapter.value?.models || []).map(model => ({ label: model, value: model }));
+    }
+    return [];
+}
+
+function getUploadedFiles(field) {
+    const value = testInput.value[field.key];
+    if (!value) return [];
+    return Array.isArray(value) ? value : [value];
+}
+
+const fileToDataUrl = (file) => {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.readAsDataURL(file);
@@ -72,32 +126,72 @@ const fileToBase64 = (file) => {
     });
 };
 
-const beforeUpload = (file) => {
-    const allowedTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-    if (!allowedTypes.includes(file.type)) {
-        message.error('仅支持 PNG, JPEG, GIF, WebP 格式');
-        return false;
-    }
-    if (testImages.value.length >= 10) {
-        message.error('最多上传 10 张图片');
-        return false;
+async function beforeUpload(field, file) {
+    try {
+        const dataUrl = await fileToDataUrl(file);
+        const item = {
+            uid: file.uid,
+            fileName: file.name,
+            mimeType: file.type,
+            dataUrl
+        };
+
+        if (field.multiple === false) {
+            testInput.value[field.key] = item;
+        } else {
+            const current = getUploadedFiles(field);
+            testInput.value[field.key] = [...current, item];
+        }
+    } catch (e) {
+        message.error(`文件读取失败: ${e.message}`);
     }
     return false;
-};
+}
 
-const handleImageChange = async (info) => {
-    const file = info.file;
-    if (file.status === 'removed') {
-        testImages.value = testImages.value.filter(f => f.uid !== file.uid);
+function removeUploadedFile(field, uid) {
+    if (field.multiple === false) {
+        testInput.value[field.key] = null;
         return;
     }
-    try {
-        const base64 = await fileToBase64(file.originFileObj || file);
-        testImages.value.push({ uid: file.uid, name: file.name, base64 });
-    } catch {
-        message.error('图片读取失败');
+    testInput.value[field.key] = getUploadedFiles(field).filter(item => item.uid !== uid);
+}
+
+function serializeFieldValue(field, value) {
+    if (field.type === 'json') {
+        if (typeof value === 'string') {
+            return JSON.parse(value);
+        }
+        return value;
     }
-};
+    if (field.type === 'file') {
+        if (!value) {
+            return field.multiple === false ? null : [];
+        }
+        if (field.multiple === false) {
+            return {
+                fileName: value.fileName,
+                mimeType: value.mimeType,
+                dataUrl: value.dataUrl
+            };
+        }
+        return value.map(item => ({
+            fileName: item.fileName,
+            mimeType: item.mimeType,
+            dataUrl: item.dataUrl
+        }));
+    }
+    return value;
+}
+
+function buildTestPayload() {
+    const adapter = selectedAdapter.value;
+    const fields = adapter?.inputSchema?.fields || [];
+    const input = {};
+    for (const field of fields) {
+        input[field.key] = serializeFieldValue(field, testInput.value[field.key]);
+    }
+    return input;
+}
 
 async function refreshAdapters() {
     loadingList.value = true;
@@ -105,7 +199,7 @@ async function refreshAdapters() {
         await settingsStore.fetchAdaptersMeta();
         if (!selectedAdapterId.value && adapters.value.length > 0) {
             selectedAdapterId.value = adapters.value[0].id;
-        } else if (selectedAdapterId.value && !adapters.value.some(a => a.id === selectedAdapterId.value)) {
+        } else if (selectedAdapterId.value && !adapters.value.some(item => item.id === selectedAdapterId.value)) {
             selectedAdapterId.value = adapters.value[0]?.id || '';
         }
     } finally {
@@ -121,7 +215,6 @@ async function loadSource(adapterId) {
     loadingSource.value = true;
     try {
         sourceCode.value = await settingsStore.fetchAdapterSource(adapterId);
-        testResult.value = null;
     } catch (e) {
         message.error(e.message);
         sourceCode.value = '';
@@ -137,6 +230,7 @@ async function handleSave() {
         await settingsStore.saveAdapterSource(selectedAdapterId.value, sourceCode.value);
         await refreshAdapters();
         await loadSource(selectedAdapterId.value);
+        resetTestInput(selectedAdapter.value);
     } catch (e) {
         Modal.error({ title: '保存失败', content: e.message });
     } finally {
@@ -193,33 +287,32 @@ async function handleTest() {
     testing.value = true;
     testResult.value = null;
     try {
-        testResult.value = await settingsStore.testAdapter(selectedAdapterId.value, {
-            workerName: testForm.value.workerName || null,
-            modelId: testForm.value.modelId || null,
-            prompt: testForm.value.prompt || '',
-            images: testImages.value.map(item => item.base64)
-        });
+        const payload = {
+            workerName: testWorkerName.value || null,
+            input: buildTestPayload()
+        };
+        testResult.value = await settingsStore.testAdapter(selectedAdapterId.value, payload);
         if (testResult.value.success) {
             message.success('测试执行完成');
         } else {
             message.warning('测试执行返回错误');
         }
     } catch (e) {
-        testResult.value = { success: false, result: { error: e.message } };
+        testResult.value = {
+            success: false,
+            result: {
+                error: e.message
+            }
+        };
         message.error(e.message);
     } finally {
         testing.value = false;
     }
 }
 
-watch(selectedAdapterId, async (id) => {
-    await loadSource(id);
-    const adapter = adapters.value.find(a => a.id === id);
-    if (adapter?.models?.length === 1) {
-        testForm.value.modelId = adapter.models[0];
-    } else if (!adapter?.models?.includes(testForm.value.modelId)) {
-        testForm.value.modelId = adapter?.models?.[0] || '';
-    }
+watch(selectedAdapterId, async (adapterId) => {
+    await loadSource(adapterId);
+    resetTestInput(selectedAdapter.value);
 });
 
 onMounted(async () => {
@@ -227,8 +320,8 @@ onMounted(async () => {
         refreshAdapters(),
         settingsStore.fetchWorkerConfig()
     ]);
-    if (availableWorkers.value.length > 0 && !testForm.value.workerName) {
-        testForm.value.workerName = availableWorkers.value[0].value;
+    if (availableWorkers.value.length > 0 && !testWorkerName.value) {
+        testWorkerName.value = availableWorkers.value[0].value;
     }
 });
 </script>
@@ -257,7 +350,10 @@ onMounted(async () => {
                                         <a-tag :color="item.valid ? 'success' : 'error'">{{ item.valid ? '有效' : '无效' }}</a-tag>
                                     </div>
                                     <div style="font-size: 12px; color: #8c8c8c; margin-top: 4px;">
-                                        {{ item.displayName || item.id }}
+                                        {{ item.name || item.id }}
+                                    </div>
+                                    <div v-if="item.providerType" style="font-size: 12px; color: #8c8c8c; margin-top: 4px;">
+                                        {{ item.providerType }}
                                     </div>
                                     <div v-if="item.error" style="font-size: 12px; color: #ff4d4f; margin-top: 4px; word-break: break-all;">
                                         {{ item.error }}
@@ -280,8 +376,9 @@ onMounted(async () => {
 
                     <a-empty v-if="!selectedAdapterId" description="请选择或创建一个适配器脚本" />
                     <template v-else>
-                        <div v-if="selectedAdapter?.description" style="margin-bottom: 12px; color: #8c8c8c;">
-                            {{ selectedAdapter.description }}
+                        <div style="margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap;">
+                            <a-tag color="blue">{{ selectedAdapter?.providerType }}</a-tag>
+                            <a-tag v-for="model in selectedAdapter?.models || []" :key="model">{{ model }}</a-tag>
                         </div>
 
                         <a-textarea v-model:value="sourceCode" :auto-size="{ minRows: 24, maxRows: 32 }" :disabled="loadingSource"
@@ -290,47 +387,72 @@ onMounted(async () => {
                         <a-divider />
 
                         <div style="font-weight: 600; margin-bottom: 12px;">测试执行</div>
-                        <a-row :gutter="12">
-                            <a-col :xs="24" :md="8">
+                        <a-row :gutter="12" style="margin-bottom: 12px;">
+                            <a-col :xs="24" :md="12">
                                 <div style="margin-bottom: 6px; font-size: 12px; color: #8c8c8c;">Worker</div>
-                                <a-select v-model:value="testForm.workerName" style="width: 100%;" :options="availableWorkers" />
+                                <a-select v-model:value="testWorkerName" style="width: 100%;" :options="availableWorkers" />
                             </a-col>
-                            <a-col :xs="24" :md="8">
-                                <div style="margin-bottom: 6px; font-size: 12px; color: #8c8c8c;">模型</div>
-                                <a-select v-model:value="testForm.modelId" style="width: 100%;"
-                                    :options="(selectedAdapter?.models || []).map(m => ({ label: m, value: m }))"
-                                    :disabled="(selectedAdapter?.models || []).length <= 1" />
-                            </a-col>
-                            <a-col :xs="24" :md="8" style="display: flex; align-items: flex-end; justify-content: flex-end;">
-                                <a-button type="primary" @click="handleTest" :loading="testing" :disabled="!selectedAdapterId || !testForm.workerName">
+                            <a-col :xs="24" :md="12" style="display: flex; align-items: flex-end; justify-content: flex-end;">
+                                <a-button type="primary" @click="handleTest" :loading="testing" :disabled="!selectedAdapterId || !testWorkerName">
                                     测试执行
                                 </a-button>
                             </a-col>
                         </a-row>
 
-                        <div style="margin-top: 12px;">
-                            <div style="margin-bottom: 6px; font-size: 12px; color: #8c8c8c;">Prompt</div>
-                            <a-textarea v-model:value="testForm.prompt" :rows="4" />
-                        </div>
+                        <template v-for="field in selectedAdapter?.inputSchema?.fields || []" :key="field.key">
+                            <div style="margin-top: 12px;">
+                                <div style="margin-bottom: 6px; font-size: 12px; color: #8c8c8c;">
+                                    {{ field.label || field.key }}
+                                </div>
 
-                        <div style="margin-top: 12px;">
-                            <div style="margin-bottom: 6px; font-size: 12px; color: #8c8c8c;">测试图片 ({{ testImages.length }}/10)</div>
-                            <a-upload-dragger :file-list="[]" :multiple="true" :before-upload="beforeUpload" @change="handleImageChange"
-                                accept=".png,.jpg,.jpeg,.gif,.webp" :show-upload-list="false" style="padding: 8px;">
-                                <p style="font-size: 12px; margin: 0; color: #8c8c8c;">点击或拖拽上传图片用于测试</p>
-                            </a-upload-dragger>
-                            <div v-if="testImages.length > 0" style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px;">
-                                <a-tag v-for="img in testImages" :key="img.uid" closable
-                                    @close="testImages = testImages.filter(i => i.uid !== img.uid)">
-                                    {{ img.name.slice(0, 15) }}{{ img.name.length > 15 ? '...' : '' }}
-                                </a-tag>
+                                <a-textarea v-if="field.type === 'textarea' || field.type === 'json'"
+                                    v-model:value="testInput[field.key]"
+                                    :rows="field.type === 'json' ? 10 : 4"
+                                    :placeholder="field.placeholder || ''" />
+
+                                <a-input v-else-if="field.type === 'input'"
+                                    v-model:value="testInput[field.key]"
+                                    :placeholder="field.placeholder || ''" />
+
+                                <a-input-number v-else-if="field.type === 'number'"
+                                    v-model:value="testInput[field.key]"
+                                    :min="field.min ?? 0"
+                                    :max="field.max ?? 100"
+                                    style="width: 100%;" />
+
+                                <a-select v-else-if="field.type === 'select'"
+                                    v-model:value="testInput[field.key]"
+                                    style="width: 100%;"
+                                    :options="getFieldOptions(field)"
+                                    :disabled="field.disabled" />
+
+                                <a-switch v-else-if="field.type === 'switch'"
+                                    v-model:checked="testInput[field.key]" />
+
+                                <template v-else-if="field.type === 'file'">
+                                    <a-upload-dragger :file-list="[]"
+                                        :multiple="field.multiple !== false"
+                                        :before-upload="file => beforeUpload(field, file)"
+                                        :accept="field.accept || '*/*'"
+                                        :show-upload-list="false"
+                                        style="padding: 8px;">
+                                        <p style="font-size: 12px; margin: 0; color: #8c8c8c;">
+                                            点击或拖拽上传{{ field.multiple === false ? '文件' : '文件列表' }}
+                                        </p>
+                                    </a-upload-dragger>
+                                    <div v-if="getUploadedFiles(field).length > 0" style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px;">
+                                        <a-tag v-for="item in getUploadedFiles(field)" :key="item.uid" closable @close="removeUploadedFile(field, item.uid)">
+                                            {{ item.fileName }}
+                                        </a-tag>
+                                    </div>
+                                </template>
                             </div>
-                        </div>
+                        </template>
 
                         <div v-if="testResult" style="margin-top: 16px;">
                             <div style="font-weight: 600; margin-bottom: 8px;">测试结果</div>
                             <a-alert :type="testResult.success ? 'success' : 'error'"
-                                :message="testResult.success ? '执行成功' : (testResult.result?.error || '执行失败')"
+                                :message="testResult.success ? '执行成功' : (testResult.result?.error?.message || testResult.result?.error || '执行失败')"
                                 show-icon />
                             <pre style="margin-top: 12px; background: #fafafa; padding: 12px; border-radius: 6px; overflow: auto; white-space: pre-wrap; word-break: break-all;">{{ JSON.stringify(testResult.result, null, 2) }}</pre>
                         </div>
@@ -343,7 +465,7 @@ onMounted(async () => {
             <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
                 适配器 ID 将作为文件名与 manifest.id，建议只使用字母、数字、点、下划线和中划线。
             </div>
-            <a-input v-model:value="newAdapterId" placeholder="例如: chatgpt" />
+            <a-input v-model:value="newAdapterId" placeholder="例如: chatgpt_image_generate" />
         </a-modal>
     </a-layout>
 </template>

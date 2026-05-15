@@ -3,9 +3,11 @@
  * @description HTTP API 服务器，提供 OpenAI 兼容的图像生成接口
  *
  * 支持的端点：
- * - GET  /v1/models          - 获取可用模型列表
- * - GET  /v1/cookies         - 获取当前浏览器 Cookies
- * - POST /v1/chat/completions - 生成图像（OpenAI 兼容格式）
+ * - GET  /v1/models               - 获取可用模型列表
+ * - GET  /v1/cookies              - 获取当前浏览器 Cookies
+ * - POST /v1/chat/completions     - Chat Completions
+ * - POST /v1/images/generations   - Images Generations
+ * - POST /v1/images/edits         - Images Edits
  *
  * 启动方式：
  * - 通过 supervisor.js 启动（推荐，支持自动重启和 Xvfb 管理）
@@ -46,11 +48,11 @@ const {
     config,
     name: backendName,
     initBrowser,
-    generate,
+    executeTask,
     TEMP_DIR,
     getModels,
-    getImagePolicy,
-    getModelType
+    getDefaultModel,
+    hasModel
 } = backend;
 
 /** @type {number} 服务器端口 */
@@ -84,7 +86,7 @@ const queueManager = createQueueManager(
     },
     {
         initBrowser,
-        generate,
+        executeTask,
         config,
         navigateToMonitor: backend.navigateToMonitor
             ? () => backend.navigateToMonitor()
@@ -116,8 +118,8 @@ const handleRequest = createGlobalRouter({
     authToken: AUTH_TOKEN,
     backendName,
     getModels,
-    getImagePolicy,
-    getModelType,
+    getDefaultModel,
+    hasModel,
     tempDir: TEMP_DIR,
     imageLimit: IMAGE_LIMIT,
     queueManager,

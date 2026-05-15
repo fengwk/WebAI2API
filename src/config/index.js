@@ -320,14 +320,6 @@ export function loadConfig() {
         config.backend.adapter = {};
     }
 
-    // 校验 gemini_biz 配置（如果有 Worker 使用）
-    const hasGeminiBizWorker = config.backend.pool.workers.some(
-        w => w.type === 'gemini_biz' || (w.type === 'merge' && w.mergeTypes?.includes('gemini_biz'))
-    );
-    if (hasGeminiBizWorker && !config.backend.adapter.gemini_biz?.entryUrl) {
-        throw new Error('存在 gemini_biz 类型的 Worker，但 backend.adapter.gemini_biz.entryUrl 未配置');
-    }
-
     // 设置日志级别
     if (config.logLevel) {
         logger.setLevel(config.logLevel);

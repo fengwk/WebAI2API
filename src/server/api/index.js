@@ -19,6 +19,8 @@ const MIME_TYPES = {
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
     '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.pdf': 'application/pdf',
     '.svg': 'image/svg+xml',
     '.ico': 'image/x-icon',
     '.woff': 'font/woff',
@@ -28,6 +30,7 @@ const MIME_TYPES = {
 
 // WebUI 静态文件目录
 const WEBUI_DIR = path.join(process.cwd(), 'webui', 'dist');
+const PUBLIC_FILES_DIR = path.join(process.cwd(), 'data', 'files');
 
 /**
  * 创建全局路由处理器
@@ -53,6 +56,32 @@ export function createGlobalRouter(context) {
         const pathname = parsedUrl.pathname;
 
         // ==================== 静态文件服务 ====================
+        if (req.method === 'GET' && pathname.startsWith('/files/')) {
+            const relativePath = decodeURIComponent(pathname.replace(/^\/files\//, ''));
+            const filePath = path.join(PUBLIC_FILES_DIR, relativePath);
+            if (!filePath.startsWith(PUBLIC_FILES_DIR)) {
+                res.writeHead(403);
+                res.end('Forbidden');
+                return;
+            }
+
+            if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+                const ext = path.extname(filePath).toLowerCase();
+                const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+                const content = fs.readFileSync(filePath);
+                res.writeHead(200, {
+                    'Content-Type': contentType,
+                    'Cache-Control': 'no-cache'
+                });
+                res.end(content);
+                return;
+            }
+
+            res.writeHead(404);
+            res.end();
+            return;
+        }
+
         if (req.method === 'GET' && !pathname.startsWith('/v1') && !pathname.startsWith('/admin')) {
             let filePath = pathname === '/' ? '/index.html' : pathname;
             filePath = path.join(WEBUI_DIR, filePath);

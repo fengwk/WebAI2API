@@ -62,29 +62,17 @@ backend:
         # 同一实例下的所有 Worker 共享浏览器数据和登录状态
         # 使用 Google OAuth 等统一登录时，只需登录一次即可用于所有 Worker
         
-        # 该浏览器实例具备的能力 (适配器列表)
+        # 该浏览器实例具备的能力 (动态适配器列表)
         # 相当于在这个浏览器里打开了不同的标签页
+        # type 必须填写 data/adapters/*.js 中 manifest.id
         workers:
           - name: "default"            # 唯一标识 (用于登录模式和日志显示)
-            # 适配器类型列表:
-            #   lmarena                (LMArena 图片生成)
-            #   lmarena_text           (LMArena 文本生成)
-            #   gemini_biz             (Gemini Business 图片、视频生成)
-            #   gemini_biz_text        (Gemini Business 文本生成)
-            #   gemini                 (Google Gemini 图片、视频生成)
-            #   gemini_text            (Google Gemini 文本生成)
-            #   zai_is                 (zAI 图片生成)
-            #   zai_is_text            (zAI 文本生成)
-            #   nanobananafree_ai      (NanoBananaFree 图片生成)
-            #   zenmux_ai_text         (ZenMux 文本生成)
-            #   chatgpt                (ChatGPT 图片生成)
-            #   chatgpt_text           (ChatGPT 文本生成)
-            #   sora                   (Sora 视频生成)
-            #   deepseek_text          (DeepSeek 文本生成)
-            #   doubao                 (豆包 图片生成)
-            #   doubao_text            (豆包 文本生成)
-            #   test                   (浏览器检测，仅供调试使用)
-            type: lmarena              # 适配器类型
+            # 动态适配器示例:
+            #   chatgpt_image_generate
+            #   chatgpt_image_edit
+            #   gemini_image_generate
+            #   gemini_image_edit
+            type: chatgpt_image_generate
 
       # ------------------------------------------------
       # 以下为多实例配置示例 (默认注释)
@@ -128,24 +116,16 @@ backend:
 
   # ========================================
   # 适配器专属配置 (按需填写)
+  # 键为动态适配器 ID，值为脚本自定义配置
   # ========================================
   adapter:
-    # Gemini Business 设置
-    gemini_biz:
-      # 入口URL
-      # 示例: "https://business.gemini.google/home/cid/8888a888-b6e0-88be-86e1-888cf3ee8cf4"
-      entryUrl: ""
-    # Lmarena 配置
-    lmarena:
-      # 开启后直接返回图片 URL (但其他不支持该选项的适配器仍然会返回 Base64)
-      returnUrl: false
-      # 该适配器的模型黑白名单 (每个适配器都可以使用该功能，配置上级为适配器ID，推荐使用 WebUI 修改)
+    chatgpt_image_generate:
+      # modelFilter 可用于过滤该适配器暴露的模型列表
       # modelFilter:
-      #  mode: whitelist                        # 白名单whitelist 黑名单blacklist
-      #  list:                                  # 仅启用和仅禁用的模型列表
-      #    - gemini-3-pro-image-preview
-      #    - gemini-3-pro-image-preview-2k
-      #    - gemini-2.5-flash-image-preview
+      #   mode: whitelist
+      #   list:
+      #     - gpt-image-2
+      enabled: true
       
 
 queue:

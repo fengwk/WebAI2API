@@ -277,22 +277,9 @@ export function validatePoolConfig(data) {
  * @returns {{valid: boolean, errors: string[]}}
  */
 export function validateAdaptersConfig(data) {
-    const errors = [];
-
     if (typeof data !== 'object' || data === null) {
         return { valid: false, errors: ['adapters 配置必须是对象'] };
     }
 
-    // gemini_biz 配置校验
-    if (data.gemini_biz) {
-        if (data.gemini_biz.entryUrl !== undefined) {
-            if (typeof data.gemini_biz.entryUrl !== 'string') {
-                errors.push('gemini_biz.entryUrl 必须是字符串');
-            } else if (data.gemini_biz.entryUrl && !data.gemini_biz.entryUrl.startsWith('https://')) {
-                errors.push('gemini_biz.entryUrl 必须以 https:// 开头');
-            }
-        }
-    }
-
-    return { valid: errors.length === 0, errors };
+    return { valid: true, errors: [] };
 }

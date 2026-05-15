@@ -9,8 +9,9 @@ import { logger } from '../../utils/logger.js';
 import { initBrowserBase, createCursor } from '../engine/launcher.js';
 import { registry } from '../registry.js';
 import { tryGotoWithCheck } from '../utils/page.js';
+import { saveRuntimeFile } from '../runtimeFiles.js';
 
-function createAdapterApi(workerName, instanceName, meta = {}) {
+function createAdapterApi(workerName, instanceName, meta = {}, fileOutput = null, page = null) {
     return {
         log(level, message, extra = {}) {
             const normalizedLevel = String(level || 'info').toLowerCase();
@@ -19,6 +20,64 @@ function createAdapterApi(workerName, instanceName, meta = {}) {
                 ...meta,
                 ...extra
             });
+        },
+        async sleep(ms) {
+            await new Promise(resolve => setTimeout(resolve, ms));
+        },
+        async saveFile(options = {}) {
+            if (!fileOutput?.rootDir || !fileOutput?.urlBasePath) {
+                throw new Error('当前上下文未启用文件输出');
+            }
+            return await saveRuntimeFile({
+                rootDir: fileOutput.rootDir,
+                urlBasePath: fileOutput.urlBasePath,
+                relativePath: options.relativePath,
+                content: options.content,
+                mimeType: options.mimeType
+            });
+        },
+        async capture(name, options = {}) {
+            if (!page) {
+                throw new Error('当前上下文不支持 capture');
+            }
+
+            const captureName = name || `capture-${Date.now()}`;
+            const capture = {
+                name: captureName,
+                url: page.url(),
+                title: await page.title().catch(() => '')
+            };
+
+            if (options.html) {
+                const saved = await saveRuntimeFile({
+                    rootDir: fileOutput.rootDir,
+                    urlBasePath: fileOutput.urlBasePath,
+                    relativePath: `captures/${captureName}.html`,
+                    content: await page.content(),
+                    mimeType: 'text/html; charset=utf-8'
+                });
+                capture.htmlUrl = saved.url;
+            }
+
+            if (options.text) {
+                capture.text = await page.locator('body').innerText({ timeout: 5000 });
+            }
+
+            if (options.screenshot !== false) {
+                const saved = await saveRuntimeFile({
+                    rootDir: fileOutput.rootDir,
+                    urlBasePath: fileOutput.urlBasePath,
+                    relativePath: `captures/${captureName}.png`,
+                    content: await page.screenshot({
+                        fullPage: !!options.fullPage,
+                        type: 'png'
+                    }),
+                    mimeType: 'image/png'
+                });
+                capture.screenshotUrl = saved.url;
+            }
+
+            return capture;
         }
     };
 }
@@ -51,7 +110,10 @@ async function persistDataUrlArtifact(artifactDir, artifactBasePath, fileBaseNam
 }
 
 function createDebugApi(workerName, instanceName, page, meta, logs, captures, artifactDir, artifactBasePath) {
-    const baseApi = createAdapterApi(workerName, instanceName, meta);
+    const baseApi = createAdapterApi(workerName, instanceName, meta, {
+        rootDir: artifactDir,
+        urlBasePath: artifactBasePath
+    }, page);
 
     return {
         ...baseApi,
@@ -64,9 +126,6 @@ function createDebugApi(workerName, instanceName, page, meta, logs, captures, ar
             };
             logs.push(entry);
             baseApi.log(level, message, extra);
-        },
-        async sleep(ms) {
-            await new Promise(resolve => setTimeout(resolve, ms));
         },
         async capture(name, options = {}) {
             const capture = {
@@ -139,12 +198,51 @@ function compileDebugRunner(script) {
     return new AsyncFunction(
         'ctx',
         'api',
-        'prompt',
-        'imagePaths',
-        'modelId',
+        'input',
         'meta',
         `const { page, context, config, proxyConfig, userDataDir, workerName, instanceName } = ctx;\n${script}`
     );
+}
+
+function normalizeExecutionError(error) {
+    if (!error) {
+        return { message: '执行失败', retryable: true };
+    }
+
+    if (typeof error === 'string') {
+        return { message: error, retryable: true };
+    }
+
+    if (typeof error === 'object') {
+        return {
+            message: String(error.message || '执行失败'),
+            code: error.code || null,
+            retryable: error.retryable !== false,
+            details: error.details || null
+        };
+    }
+
+    return { message: String(error), retryable: true };
+}
+
+function normalizeExecutionResult(result) {
+    if (!result || typeof result !== 'object' || typeof result.success !== 'boolean') {
+        throw new Error('适配器必须返回 { success, data, error }');
+    }
+
+    if (result.success) {
+        return {
+            success: true,
+            data: result.data ?? null,
+            error: null
+        };
+    }
+
+    return {
+        success: false,
+        data: null,
+        error: normalizeExecutionError(result.error)
+    };
 }
 
 /**
@@ -451,171 +549,110 @@ export class Worker {
     }
 
     /**
-     * 检查是否支持指定模型
+     * 检查是否支持指定 provider + model
      */
-    supports(modelId) {
+    supports(providerType, modelId) {
         if (this.type === 'merge') {
-            // 检查任一适配器是否支持该模型
-            for (const type of this.mergeTypes) {
-                if (registry.supportsModel(type, modelId)) return true;
-            }
-            // 支持 type/model 格式
-            if (modelId.includes('/')) {
-                const [specifiedType, actualModel] = modelId.split('/', 2);
-                if (this.mergeTypes.includes(specifiedType)) {
-                    return registry.supportsModel(specifiedType, actualModel);
-                }
-            }
-            return false;
-        } else {
-            // 支持 type/model 格式
-            if (modelId.includes('/')) {
-                const [specifiedType, actualModel] = modelId.split('/', 2);
-                if (specifiedType === this.type) {
-                    return registry.supportsModel(this.type, actualModel);
-                }
-                return false;
-            }
-            return registry.supportsModel(this.type, modelId);
+            return this.mergeTypes.some(type => registry.supportsTask(type, providerType, modelId));
         }
+        return registry.supportsTask(this.type, providerType, modelId);
     }
 
     /**
-     * 确定模型对应的适配器类型（内部辅助方法）
+     * 获取支持当前任务的候选适配器类型
      * @private
      */
-    _getAdapterType(modelKey) {
-        if (this.type === 'merge') {
-            if (modelKey.includes('/')) {
-                const [specifiedType] = modelKey.split('/', 2);
-                return this.mergeTypes.includes(specifiedType) ? specifiedType : this.mergeTypes[0];
-            }
-            // 找到第一个支持该模型的适配器
-            for (const type of this.mergeTypes) {
-                if (registry.supportsModel(type, modelKey)) return type;
-            }
-            return this.mergeTypes[0];
-        }
-        return this.type;
+    _getCandidateTypes(providerType, modelId) {
+        const types = this.type === 'merge' ? this.mergeTypes : [this.type];
+        return types.filter(type => registry.supportsTask(type, providerType, modelId));
     }
 
-    /**
-     * 生成图片
-     */
-    async generate(ctx, prompt, paths, modelId, meta) {
+    async executeTask(ctx, task, meta = {}) {
         const failoverConfig = this.globalConfig.backend?.pool?.failover || {};
-        const failoverEnabled = failoverConfig.enabled !== false;
-
-        if (this.type === 'merge' && failoverEnabled) {
-            return this._generateWithFailover(ctx, prompt, paths, modelId, meta, failoverConfig);
-        }
-
-        // 验证是否支持该模型
-        if (!this.supports(modelId)) {
-            return { error: `Worker [${this.name}] 不支持模型: ${modelId}` };
-        }
-
-        // 确定适配器类型
-        const type = this._getAdapterType(modelId);
-
-        // 处理 type/model 格式，提取实际 modelId
-        let actualModelId = modelId;
-        if (modelId.includes('/')) {
-            const parts = modelId.split('/', 2);
-            actualModelId = parts[1];
-        }
-
-        // 传递原始 modelId 给适配器，由适配器自己解析
-        return this._executeAdapter(ctx, type, actualModelId, prompt, paths, meta);
-    }
-
-    /**
-     * Merge 模式下的故障转移生成
-     * @private
-     */
-    async _generateWithFailover(ctx, prompt, paths, modelId, meta, failoverConfig = {}) {
-        const maxRetries = failoverConfig.maxRetries || 2;
-        const candidateTypes = this._getCandidateTypes(modelId);
-
+        const candidateTypes = this._getCandidateTypes(task.providerType, task.modelId);
         if (candidateTypes.length === 0) {
-            return { error: `Worker [${this.name}] 不支持模型: ${modelId}` };
+            return {
+                success: false,
+                data: null,
+                error: {
+                    message: `Worker [${this.name}] 不支持 provider=${task.providerType}, model=${task.modelId || 'default'}`,
+                    retryable: false
+                }
+            };
         }
 
-        const maxAttempts = maxRetries === 0 ? candidateTypes.length : Math.min(maxRetries + 1, candidateTypes.length);
+        if (this.type !== 'merge' || failoverConfig.enabled === false || candidateTypes.length === 1) {
+            return await this._executeAdapter(ctx, candidateTypes[0], task, meta);
+        }
+
+        const maxRetries = failoverConfig.maxRetries ?? 2;
+        const maxAttempts = maxRetries === 0
+            ? candidateTypes.length
+            : Math.min(maxRetries + 1, candidateTypes.length);
+
         let lastError = null;
-        let lastRetryable = undefined;
-
         for (let i = 0; i < maxAttempts; i++) {
-            const { type, modelId: actualModelId } = candidateTypes[i];
-            const result = await this._executeAdapter(ctx, type, actualModelId, prompt, paths, meta);
-
-            if (!result.error) {
+            const type = candidateTypes[i];
+            const result = await this._executeAdapter(ctx, type, task, meta);
+            if (result.success) {
                 return result;
             }
 
             lastError = result.error;
-            lastRetryable = result.retryable;
-
-            // 如果明确标记为不可重试（如内容安全问题），立即返回
-            if (result.retryable === false) {
-                return { error: `所有支持该模型的适配器都无法使用: ${lastError}`, retryable: false };
+            if (result.error?.retryable === false) {
+                return result;
             }
 
             if (i < maxAttempts - 1) {
-                logger.warn('工作池', `[${this.name}] ${type} 失败，尝试下一个适配器...`, { error: lastError, ...meta });
+                logger.warn('工作池', `[${this.name}] ${type} 失败，尝试下一个适配器...`, {
+                    error: result.error?.message,
+                    ...meta
+                });
             }
         }
 
-        return { error: `所有支持该模型的适配器都无法使用: ${lastError}`, retryable: lastRetryable };
-    }
-
-    /**
-     * 获取支持指定模型的候选适配器类型列表
-     * @private
-     */
-    _getCandidateTypes(modelKey) {
-        const candidates = [];
-
-        if (modelKey.includes('/')) {
-            const [specifiedType, actualModel] = modelKey.split('/', 2);
-            if (this.mergeTypes.includes(specifiedType) && registry.supportsModel(specifiedType, actualModel)) {
-                candidates.push({ type: specifiedType, modelId: actualModel });
-            }
-            return candidates;
-        }
-
-        // 收集所有支持该模型的适配器
-        for (const type of this.mergeTypes) {
-            if (registry.supportsModel(type, modelKey)) {
-                candidates.push({ type, modelId: modelKey });
-            }
-        }
-
-        return candidates;
+        return {
+            success: false,
+            data: null,
+            error: lastError || { message: '所有候选适配器都执行失败', retryable: true }
+        };
     }
 
     /**
      * 执行单个适配器
      * @private
      */
-    async _executeAdapter(ctx, type, modelId, prompt, paths, meta) {
-        // 检查 Worker 是否已初始化（浏览器崩溃后会被标记为 false）
+    async _executeAdapter(ctx, type, task, meta) {
         if (!this.initialized || !this.page || this.page.isClosed()) {
             logger.info('工作池', `[${this.name}] 浏览器已断开，正在自动重新初始化...`, meta);
             try {
                 await this._reinit();
             } catch (e) {
                 logger.error('工作池', `[${this.name}] 重新初始化失败`, { error: e.message, ...meta });
-                return { error: `Worker 重新初始化失败: ${e.message}` };
+                return {
+                    success: false,
+                    data: null,
+                    error: {
+                        message: `Worker 重新初始化失败: ${e.message}`,
+                        retryable: true
+                    }
+                };
             }
         }
 
         const adapter = registry.getAdapter(type);
         if (!adapter) {
-            return { error: `适配器不存在: ${type}` };
+            return {
+                success: false,
+                data: null,
+                error: {
+                    message: `适配器不存在: ${type}`,
+                    retryable: false
+                }
+            };
         }
 
-        logger.info('工作池', `[${this.name}] 执行任务 -> ${type}/${modelId}`, meta);
+        logger.info('工作池', `[${this.name}] 执行任务 -> ${type} (${task.providerType}/${task.modelId || 'default'})`, meta);
 
         const subContext = {
             ...ctx,
@@ -626,29 +663,45 @@ export class Worker {
             userDataDir: this.userDataDir,
             workerName: this.name,
             instanceName: this.instanceName,
-            api: createAdapterApi(this.name, this.instanceName, meta)
+            worker: {
+                name: this.name,
+                type: this.type,
+                instance: this.instanceName
+            },
+            api: createAdapterApi(this.name, this.instanceName, meta, task.fileOutput, this.page)
         };
-
-        // 扩展 meta，添加 adapter 和 model 信息
-        const enrichedMeta = { ...meta, adapter: type, model: modelId };
 
         this.busyCount++;
         try {
-            // 传递原始 modelId，由适配器自己解析
-            return await adapter.generate(subContext, prompt, paths, modelId, enrichedMeta);
+            const result = await adapter.execute(subContext, task.input);
+            return normalizeExecutionResult(result);
+        } catch (err) {
+            logger.error('工作池', `[${this.name}] 适配器执行异常`, { error: err.message, ...meta });
+            return {
+                success: false,
+                data: null,
+                error: normalizeExecutionError(err)
+            };
         } finally {
             this.busyCount--;
         }
     }
 
-    async runAdapterTest(adapterId, prompt, paths, modelId, meta = {}) {
+    async runAdapterTest(adapterId, task, meta = {}) {
         if (!this.initialized || !this.browser) {
             await this._reinit();
         }
 
         const adapter = registry.getAdapter(adapterId);
         if (!adapter) {
-            return { error: `适配器不存在: ${adapterId}` };
+            return {
+                success: false,
+                data: null,
+                error: {
+                    message: `适配器不存在: ${adapterId}`,
+                    retryable: false
+                }
+            };
         }
 
         const page = await this.browser.newPage();
@@ -673,17 +726,25 @@ export class Worker {
             userDataDir: this.userDataDir,
             workerName: this.name,
             instanceName: this.instanceName,
-            api: createAdapterApi(this.name, this.instanceName, meta)
+            worker: {
+                name: this.name,
+                type: this.type,
+                instance: this.instanceName
+            },
+            api: createAdapterApi(this.name, this.instanceName, meta, task.fileOutput, page)
         };
 
         this.busyCount++;
         try {
-            return await adapter.generate(subContext, prompt, paths, modelId, {
-                ...meta,
-                adapter: adapterId,
-                model: modelId,
-                test: true
-            });
+            const result = await adapter.execute(subContext, task.input);
+            return normalizeExecutionResult(result);
+        } catch (err) {
+            logger.error('工作池', `[${this.name}] 适配器测试异常`, { error: err.message, ...meta });
+            return {
+                success: false,
+                data: null,
+                error: normalizeExecutionError(err)
+            };
         } finally {
             this.busyCount--;
             try {
@@ -703,7 +764,6 @@ export class Worker {
         this.browser = null;
         this.page = null;
 
-        // 使用保存的参数重新初始化
         await this._initNewBrowser(this._targetUrl || 'about:blank', this._navigationHandler || null);
         this.initialized = true;
         logger.info('工作池', `[${this.name}] 浏览器已成功重新初始化`);
@@ -713,58 +773,21 @@ export class Worker {
      * 获取支持的模型列表
      */
     getModels() {
-        if (this.type === 'merge') {
-            const allModels = [];
-            const seenIds = new Set();
-
-            for (const type of this.mergeTypes) {
-                const result = registry.getModelsForAdapter(type);
-                if (result?.data) {
-                    for (const m of result.data) {
-                        if (!seenIds.has(m.id)) {
-                            seenIds.add(m.id);
-                            allModels.push({ ...m, owned_by: 'internal_server' });
-                        }
-                    }
-                }
+        const types = this.type === 'merge' ? this.mergeTypes : [this.type];
+        const seenIds = new Set();
+        const models = [];
+        for (const type of types) {
+            const result = registry.getModelsForAdapter(type);
+            for (const model of result.data || []) {
+                if (seenIds.has(model.id)) continue;
+                seenIds.add(model.id);
+                models.push(model);
             }
-
-            for (const type of this.mergeTypes) {
-                const result = registry.getModelsForAdapter(type);
-                if (result?.data) {
-                    for (const m of result.data) {
-                        allModels.push({
-                            ...m,
-                            id: `${type}/${m.id}`,
-                            owned_by: type
-                        });
-                    }
-                }
-            }
-
-            return allModels;
-        } else {
-            const result = registry.getModelsForAdapter(this.type);
-            const models = result?.data || [];
-            const allModels = [];
-
-            for (const m of models) {
-                allModels.push({ ...m, owned_by: 'internal_server' });
-            }
-
-            for (const m of models) {
-                allModels.push({
-                    ...m,
-                    id: `${this.type}/${m.id}`,
-                    owned_by: this.type
-                });
-            }
-
-            return allModels;
         }
+        return models;
     }
 
-    async runDebugScript(script, prompt, paths, modelId, meta = {}, options = {}) {
+    async runDebugScript(script, input, meta = {}, options = {}) {
         if (!this.initialized || !this.browser) {
             await this._reinit();
         }
@@ -802,13 +825,18 @@ export class Worker {
             userDataDir: this.userDataDir,
             workerName: this.name,
             instanceName: this.instanceName,
+            worker: {
+                name: this.name,
+                type: this.type,
+                instance: this.instanceName
+            },
             api
         };
 
         this.busyCount++;
         try {
             const runner = compileDebugRunner(script);
-            const result = await runner(ctx, api, prompt, paths, modelId, meta);
+            const result = await runner(ctx, api, input, meta);
             if (result?.image && typeof result.image === 'string' && result.image.startsWith('data:')) {
                 const imageUrl = await persistDataUrlArtifact(artifactDir, artifactBasePath, 'result-image', result.image);
                 if (imageUrl) {
@@ -855,58 +883,6 @@ export class Worker {
                     }
                 } catch { }
             }
-        }
-    }
-
-    /**
-     * 获取图片策略（宽松策略：只要有一个适配器支持 optional 就返回 optional）
-     */
-    getImagePolicy(modelKey) {
-        const policies = new Set();
-
-        if (this.type === 'merge') {
-            if (modelKey.includes('/')) {
-                const [specifiedType, actualModel] = modelKey.split('/', 2);
-                if (this.mergeTypes.includes(specifiedType)) {
-                    return registry.getImagePolicy(specifiedType, actualModel);
-                }
-            }
-            // 收集所有支持该模型的适配器的 imagePolicy
-            for (const type of this.mergeTypes) {
-                if (registry.supportsModel(type, modelKey)) {
-                    policies.add(registry.getImagePolicy(type, modelKey));
-                }
-            }
-        } else {
-            return registry.getImagePolicy(this.type, modelKey);
-        }
-
-        // 宽松策略：只要有一个 optional 就返回 optional
-        if (policies.has('optional')) return 'optional';
-        if (policies.has('required')) return 'required';
-        if (policies.has('forbidden')) return 'forbidden';
-        return 'optional';
-    }
-
-    /**
-     * 获取模型类型
-     */
-    getModelType(modelKey) {
-        if (this.type === 'merge') {
-            if (modelKey.includes('/')) {
-                const [specifiedType, actualModel] = modelKey.split('/', 2);
-                if (this.mergeTypes.includes(specifiedType)) {
-                    return registry.getModelType(specifiedType, actualModel);
-                }
-            }
-            for (const type of this.mergeTypes) {
-                if (registry.supportsModel(type, modelKey)) {
-                    return registry.getModelType(type, modelKey);
-                }
-            }
-            return 'image';
-        } else {
-            return registry.getModelType(this.type, modelKey);
         }
     }
 

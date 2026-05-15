@@ -32,7 +32,7 @@ RUN npm install -g pnpm@10.33.4 && pnpm install --frozen-lockfile
 # 3. 复制源码并初始化
 COPY . .
 RUN npm run init
-RUN cd webui && npm install && npm run build
+RUN npm --prefix webui install --package-lock=false && npm --prefix webui run build
 
 # 4. 启动服务（配置文件会自动从 config.example.yaml 复制到 data/config.yaml）
 CMD ["npm", "start", "--", "-xvfb", "-vnc"]

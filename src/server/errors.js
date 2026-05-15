@@ -25,6 +25,10 @@ export const ERROR_TYPES = {
 export const ERROR_CODES = {
     /** 未授权（Token 无效或缺失） */
     UNAUTHORIZED: 'UNAUTHORIZED',
+    /** 请求体非法 */
+    INVALID_REQUEST_BODY: 'INVALID_REQUEST_BODY',
+    /** 资源不存在 */
+    NOT_FOUND: 'NOT_FOUND',
     /** 浏览器未初始化 */
     BROWSER_NOT_INITIALIZED: 'BROWSER_NOT_INITIALIZED',
     /** 服务器繁忙（队列已满） */
@@ -57,6 +61,16 @@ const ERROR_DETAILS = {
     [ERROR_CODES.UNAUTHORIZED]: {
         message: '未授权（Token 无效或缺失）',
         status: 401,
+        type: ERROR_TYPES.INVALID_REQUEST,
+    },
+    [ERROR_CODES.INVALID_REQUEST_BODY]: {
+        message: '请求体格式无效',
+        status: 400,
+        type: ERROR_TYPES.INVALID_REQUEST,
+    },
+    [ERROR_CODES.NOT_FOUND]: {
+        message: '资源不存在',
+        status: 404,
         type: ERROR_TYPES.INVALID_REQUEST,
     },
     [ERROR_CODES.BROWSER_NOT_INITIALIZED]: {
@@ -182,4 +196,3 @@ export const ADAPTER_ERRORS = {
     /** 内容被阻止 (API/页面检测到错误关键词) */
     CONTENT_BLOCKED: 'CONTENT_BLOCKED',
 };
-

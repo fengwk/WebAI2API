@@ -58,6 +58,7 @@ import {
     normalizeAdapterId,
     adapterSourceExists
 } from '../../../backend/adapterStore.js';
+import { getProvider } from '../../../backend/providers/registry.js';
 
 function buildRequestId() {
     return `adapter-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -108,8 +109,9 @@ async function inspectAdapterFile(file) {
                 fileId: file.id,
                 valid: false,
                 error: '未导出 manifest',
-                displayName: file.id,
-                description: '',
+                name: file.id,
+                providerType: null,
+                inputSchema: { fields: [] },
                 models: []
             };
         }
@@ -121,9 +123,10 @@ async function inspectAdapterFile(file) {
                 fileId: file.id,
                 valid: false,
                 error: `manifest.id 必须与文件名一致 (${file.id})`,
-                displayName: manifest.displayName || file.id,
-                description: manifest.description || '',
-                models: (manifest.models || []).map(m => m.id)
+                name: manifest.name || file.id,
+                providerType: manifest.provider?.type || null,
+                inputSchema: { fields: [] },
+                models: manifest.provider?.models || []
             };
         }
 
@@ -134,22 +137,25 @@ async function inspectAdapterFile(file) {
                 fileId: file.id,
                 valid: false,
                 error: errors.join('; '),
-                displayName: manifest.displayName || file.id,
-                description: manifest.description || '',
-                models: (manifest.models || []).map(m => m.id)
+                name: manifest.name || file.id,
+                providerType: manifest.provider?.type || null,
+                inputSchema: { fields: [] },
+                models: manifest.provider?.models || []
             };
         }
+
+        const provider = getProvider(manifest.provider.type);
 
         return {
             id: manifest.id,
             fileId: file.id,
             valid: true,
             error: null,
-            displayName: manifest.displayName || manifest.id,
-            description: manifest.description || '',
-            models: (manifest.models || []).map(m => m.id),
-            modelCount: manifest.models?.length || 0,
-            configSchema: manifest.configSchema || []
+            name: manifest.name || manifest.id,
+            providerType: manifest.provider.type,
+            models: manifest.provider.models || [],
+            modelCount: manifest.provider.models?.length || 0,
+            inputSchema: provider?.buildInputSchema(manifest) || { fields: [] }
         };
     } catch (err) {
         return {
@@ -157,8 +163,9 @@ async function inspectAdapterFile(file) {
             fileId: file.id,
             valid: false,
             error: err.message,
-            displayName: file.id,
-            description: '',
+            name: file.id,
+            providerType: null,
+            inputSchema: { fields: [] },
             models: []
         };
     }
@@ -171,29 +178,6 @@ async function listDynamicAdapters() {
         results.push(await inspectAdapterFile(file));
     }
     return results;
-}
-
-async function saveTestImages(images, tempDir) {
-    if (!Array.isArray(images) || images.length === 0) {
-        return [];
-    }
-
-    const createdPaths = [];
-    for (let i = 0; i < images.length; i++) {
-        const dataUri = images[i];
-        if (typeof dataUri !== 'string' || !dataUri.startsWith('data:image/')) {
-            continue;
-        }
-        const mimeMatch = dataUri.match(/^data:(image\/[^;]+);base64,(.+)$/);
-        if (!mimeMatch) continue;
-        const mimeType = mimeMatch[1];
-        const base64 = mimeMatch[2];
-        const ext = mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
-        const filePath = path.join(tempDir, `adapter-test-${Date.now()}-${i}.${ext}`);
-        await fs.writeFile(filePath, Buffer.from(base64, 'base64'));
-        createdPaths.push(filePath);
-    }
-    return createdPaths;
 }
 
 /**
@@ -596,10 +580,19 @@ export function createAdminRouter(context) {
                 }
 
                 const body = await readBody(req);
-                const prompt = String(body.prompt || '');
                 const workerName = body.workerName || null;
-                const modelId = body.modelId || null;
-                const imagePaths = await saveTestImages(body.images, tempDir);
+                const requestId = buildRequestId();
+                const adapter = registry.getAdapter(adapterId);
+                const provider = adapter ? getProvider(adapter.provider.type) : null;
+                if (!adapter || !provider) {
+                    sendApiError(res, { code: ERROR_CODES.INVALID_MODEL, message: '适配器缺少有效 provider，无法执行测试' });
+                    return;
+                }
+
+                const normalized = await provider.normalizeAdminInput(body, {
+                    tempDir,
+                    requestId
+                }, adapter);
 
                 let poolContext = queueManager?.getPoolContext?.();
                 if (!poolContext) {
@@ -607,12 +600,20 @@ export function createAdminRouter(context) {
                 }
 
                 try {
-                    const result = await poolContext.poolManager.testAdapter(workerName, adapterId, prompt, imagePaths, modelId, {
-                        id: buildRequestId()
+                    const result = await poolContext.poolManager.testAdapter(workerName, adapterId, {
+                        providerType: adapter.provider.type,
+                        modelId: normalized.modelId,
+                        input: normalized.input,
+                        fileOutput: {
+                            rootDir: path.join(process.cwd(), 'data', 'files', 'tests', requestId),
+                            urlBasePath: `/files/tests/${encodeURIComponent(requestId)}`
+                        }
+                    }, {
+                        id: requestId
                     });
-                    sendJson(res, 200, { success: !result.error, result });
+                    sendJson(res, 200, { success: result.success, result });
                 } finally {
-                    for (const p of imagePaths) {
+                    for (const p of normalized.cleanupPaths || []) {
                         try {
                             await fs.unlink(p);
                         } catch { }
@@ -624,17 +625,16 @@ export function createAdminRouter(context) {
             // POST /admin/debug/run - 直接执行临时调试脚本
             if (method === 'POST' && pathname === '/debug/run') {
                 const body = await readBody(req);
-                if (typeof body.script !== 'string' || !body.script.trim()) {
+                const script = typeof body.script === 'string' ? body.script : body.source;
+                if (typeof script !== 'string' || !script.trim()) {
                     sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: '缺少 script 字段' });
                     return;
                 }
 
-                const prompt = String(body.prompt || '');
                 const workerName = body.workerName || null;
-                const modelId = body.modelId || null;
+                const input = body.input && typeof body.input === 'object' ? body.input : {};
                 const keepPageOpen = !!body.keepPageOpen;
                 const timeout = body.timeout || null;
-                const imagePaths = await saveTestImages(body.images, tempDir);
 
                 let poolContext = queueManager?.getPoolContext?.();
                 if (!poolContext) {
@@ -650,21 +650,13 @@ export function createAdminRouter(context) {
                 try {
                     const result = await poolContext.poolManager.runDebugScript(
                         workerName,
-                        body.script,
-                        prompt,
-                        imagePaths,
-                        modelId,
+                        script,
+                        input,
                         { id: runId, debug: true },
                         { keepPageOpen, timeout, artifactDir, artifactBasePath }
                     );
                     result.runId = runId;
                     sendJson(res, 200, result);
-                } finally {
-                    for (const p of imagePaths) {
-                        try {
-                            await fs.unlink(p);
-                        } catch { }
-                    }
                 }
                 return;
             }

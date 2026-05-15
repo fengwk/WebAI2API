@@ -1,44 +1,33 @@
 /**
  * @fileoverview OpenAI 兼容 API 路由
- * @description 处理 /v1 路径下的所有 API 请求
+ * @description 处理 /v1 路径下的模型、Cookies、Chat Completions 与 Images 协议。
  */
 
 import crypto from 'crypto';
 import { logger } from '../../../utils/logger.js';
 import { ERROR_CODES } from '../../errors.js';
 import { sendJson, sendApiError } from '../../respond.js';
-import { parseRequest } from './parse.js';
+import { parseProviderRequest } from './request.js';
 
-/**
- * 创建 OpenAI API 路由处理器
- * @param {object} context - 路由上下文
- * @returns {Function} 路由处理函数
- */
+function buildRequestId() {
+    return crypto.randomUUID().slice(0, 8);
+}
+
 export function createOpenAIRouter(context) {
     const {
-        backendName,
         getModels,
-        getImagePolicy,
-        getModelType,
+        getDefaultModel,
+        hasModel,
         tempDir,
-        imageLimit,
         queueManager
     } = context;
 
-    /**
-     * 处理 GET /v1/models
-     */
     function handleModels(res) {
-        const models = getModels();
-        sendJson(res, 200, models);
+        sendJson(res, 200, getModels());
     }
 
-    /**
-     * 处理 GET /v1/cookies
-     */
     async function handleCookies(res, requestId, workerName, domain) {
         const poolContext = queueManager.getPoolContext();
-
         if (!poolContext?.poolManager) {
             sendApiError(res, { code: ERROR_CODES.BROWSER_NOT_INITIALIZED });
             return;
@@ -52,47 +41,48 @@ export function createOpenAIRouter(context) {
             });
         } catch (err) {
             logger.error('服务器', '获取 Cookies 失败', { id: requestId, error: err.message });
-
-            if (err.message.includes('Worker 不存在') || err.message.includes('Worker not found')) {
-                sendApiError(res, {
-                    code: ERROR_CODES.INVALID_MODEL,
-                    message: err.message
-                });
-            } else {
-                sendApiError(res, {
-                    code: ERROR_CODES.INTERNAL_ERROR,
-                    message: err.message
-                });
-            }
+            sendApiError(res, {
+                code: ERROR_CODES.INTERNAL_ERROR,
+                message: err.message
+            });
         }
     }
 
-    /**
-     * 处理 POST /v1/chat/completions
-     */
-    async function handleChatCompletions(req, res, requestId) {
-        const chunks = [];
-        for await (const chunk of req) {
-            chunks.push(chunk);
-        }
-
+    async function handleTaskRequest(req, res, requestId, providerType) {
         try {
-            const body = Buffer.concat(chunks).toString();
-            const data = JSON.parse(body);
-            const isStreaming = data.stream === true;
+            const parseResult = await parseProviderRequest(req, {
+                providerType,
+                tempDir,
+                requestId,
+                resolveDefaultModel: getDefaultModel
+            });
 
-            // 限流检查
-            if (!isStreaming && !queueManager.canAcceptNonStreaming()) {
-                const status = queueManager.getStatus();
-                logger.warn('服务器', '非流式请求被拒绝 (队列已满)', { id: requestId, queueSize: status.total });
+            if (parseResult.payload?.model && !hasModel(providerType, parseResult.modelId)) {
                 sendApiError(res, {
-                    code: ERROR_CODES.SERVER_BUSY,
-                    message: `服务器繁忙（队列: ${status.total}/${queueManager.maxQueueSize}）。请使用流式模式 (stream: true) 或稍后重试。`
+                    code: ERROR_CODES.INVALID_MODEL,
+                    message: `模型无效或当前无可用适配器: ${parseResult.modelId}`
                 });
                 return;
             }
 
-            // 设置 SSE 响应头
+            if (providerType !== 'openai-chat-completions' && parseResult.payload?.stream === true) {
+                sendApiError(res, {
+                    code: ERROR_CODES.INVALID_REQUEST_BODY,
+                    message: `${providerType} 不支持 stream=true`
+                });
+                return;
+            }
+
+            const isStreaming = providerType === 'openai-chat-completions' && parseResult.payload?.stream === true;
+            if (!isStreaming && !queueManager.canAcceptNonStreaming()) {
+                const status = queueManager.getStatus();
+                sendApiError(res, {
+                    code: ERROR_CODES.SERVER_BUSY,
+                    message: `服务器繁忙（队列: ${status.total}/${queueManager.maxQueueSize}）。请稍后重试。`
+                });
+                return;
+            }
+
             if (isStreaming) {
                 res.writeHead(200, {
                     'Content-Type': 'text/event-stream',
@@ -101,75 +91,61 @@ export function createOpenAIRouter(context) {
                 });
             }
 
-            // 解析请求
-            const parseResult = await parseRequest(data, {
-                tempDir,
-                imageLimit,
-                backendName,
-                getSupportedModels: getModels,
-                getImagePolicy,
-                getModelType,
-                requestId,
-                logger
-            });
-
-            if (!parseResult.success) {
-                sendApiError(res, {
-                    code: parseResult.error.code,
-                    message: parseResult.error.error,
-                    isStreaming
-                });
-                return;
-            }
-
-            const { prompt, imagePaths, modelId, modelName } = parseResult.data;
-            const reasoning = data.reasoning === true;
-
-            logger.info('服务器', `[队列] 请求入队: ${prompt.slice(0, 100)}...`, { id: requestId, images: imagePaths.length });
-
-            // 加入队列
             queueManager.addTask({
                 req,
                 res,
-                prompt,
-                imagePaths,
-                modelId,
-                modelName,
                 id: requestId,
-                isStreaming,
-                reasoning
+                providerType,
+                provider: parseResult.provider,
+                payload: parseResult.payload,
+                input: parseResult.input,
+                modelId: parseResult.modelId,
+                modelName: parseResult.modelId,
+                promptText: parseResult.promptText,
+                inputFiles: parseResult.inputFiles,
+                cleanupPaths: parseResult.cleanupPaths,
+                isStreaming
             });
-
         } catch (err) {
-            logger.error('服务器', '请求处理失败', { id: requestId, error: err.message });
+            logger.error('服务器', '请求解析失败', { id: requestId, error: err.message });
             sendApiError(res, {
-                code: ERROR_CODES.INTERNAL_ERROR,
+                code: ERROR_CODES.INVALID_REQUEST_BODY,
                 message: err.message
             });
         }
     }
 
-    /**
-     * OpenAI API 路由处理函数
-     * @param {import('http').IncomingMessage} req
-     * @param {import('http').ServerResponse} res
-     * @param {string} pathname - 去除 /v1 前缀后的路径
-     * @param {URL} parsedUrl - 解析后的 URL 对象
-     */
     return async function handleOpenAIRequest(req, res, pathname, parsedUrl) {
-        const requestId = crypto.randomUUID().slice(0, 8);
+        const requestId = buildRequestId();
 
         if (req.method === 'GET' && pathname === '/models') {
             handleModels(res);
-        } else if (req.method === 'GET' && pathname === '/cookies') {
+            return;
+        }
+
+        if (req.method === 'GET' && pathname === '/cookies') {
             const workerName = parsedUrl.searchParams.get('name');
             const domain = parsedUrl.searchParams.get('domain');
             await handleCookies(res, requestId, workerName, domain);
-        } else if (req.method === 'POST' && pathname.startsWith('/chat/completions')) {
-            await handleChatCompletions(req, res, requestId);
-        } else {
-            res.writeHead(404);
-            res.end();
+            return;
         }
+
+        if (req.method === 'POST' && pathname === '/chat/completions') {
+            await handleTaskRequest(req, res, requestId, 'openai-chat-completions');
+            return;
+        }
+
+        if (req.method === 'POST' && pathname === '/images/generations') {
+            await handleTaskRequest(req, res, requestId, 'openai-images-generations');
+            return;
+        }
+
+        if (req.method === 'POST' && pathname === '/images/edits') {
+            await handleTaskRequest(req, res, requestId, 'openai-images-edits');
+            return;
+        }
+
+        res.writeHead(404);
+        res.end();
     };
 }

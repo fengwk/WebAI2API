@@ -4,8 +4,8 @@
  *
  * 对外统一能力：
  * - `initBrowser(cfg)` → 初始化 Pool
- * - `generate(ctx, prompt, imagePaths, modelId, meta)`
- * - `getModels()` / `getImagePolicy(modelKey)` / `getModelType(modelKey)`
+ * - `executeTask(ctx, task, meta)`
+ * - `getModels()` / `getDefaultModel(providerType)`
  * - `getCookies(workerName, domain)` - 获取指定 Worker 的 Cookies
  */
 
@@ -59,19 +59,18 @@ export function getBackend() {
             return { poolManager, config: cfg };
         },
 
-        /**
-         * 生成图片
-         * @param {object} ctx - 浏览器上下文 (来自 initBrowser 返回)
-         * @param {string} prompt - 提示词
-         * @param {string[]} paths - 图片路径
-         * @param {string} modelId - 模型 ID
-         * @param {object} meta - 元信息
-         */
-        generate: async (ctx, prompt, paths, modelId, meta) => {
+        executeTask: async (ctx, task, meta) => {
             if (!poolManager) {
-                return { error: 'Pool 未初始化' };
+                return {
+                    success: false,
+                    data: null,
+                    error: {
+                        message: 'Pool 未初始化',
+                        retryable: true
+                    }
+                };
             }
-            return await poolManager.generate(ctx, prompt, paths, modelId, meta);
+            return await poolManager.executeTask(ctx, task, meta);
         },
 
         /**
@@ -85,28 +84,18 @@ export function getBackend() {
             return poolManager.getModels();
         },
 
-        /**
-         * 获取图片策略
-         * @param {string} modelKey - 模型 key
-         * @returns {string}
-         */
-        getImagePolicy: (modelKey) => {
+        getDefaultModel: (providerType) => {
             if (!poolManager) {
-                return 'optional';
+                return null;
             }
-            return poolManager.getImagePolicy(modelKey);
+            return poolManager.getDefaultModel(providerType);
         },
 
-        /**
-         * 获取模型类型
-         * @param {string} modelKey - 模型 key
-         * @returns {string} 'text' | 'image'
-         */
-        getModelType: (modelKey) => {
+        hasModel: (providerType, modelId) => {
             if (!poolManager) {
-                return 'image';
+                return false;
             }
-            return poolManager.getModelType(modelKey);
+            return poolManager.hasModel(providerType, modelId);
         },
 
         /**

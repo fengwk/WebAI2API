@@ -26,7 +26,7 @@ onMounted(async () => {
 // 计算属性：适配器选项（包含 merge）
 const adapterOptions = computed(() => {
     const options = settingsStore.adaptersMeta.filter(a => a.valid !== false).map(a => ({
-        label: a.displayName || a.id,
+        label: a.name || a.id,
         value: a.id
     }));
     // 将 Merge 选项放在第一个位置
@@ -41,16 +41,16 @@ const mergeableAdapterOptions = computed(() => {
     return settingsStore.adaptersMeta
         .filter(a => a.id !== 'merge' && a.valid !== false)
         .map(a => ({
-            label: a.displayName || a.id,
+            label: a.name || a.id,
             value: a.id
         }));
 });
 
-// 辅助函数：根据适配器 ID 获取 displayName
+// 辅助函数：根据适配器 ID 获取名称
 const getAdapterDisplayName = (id) => {
     if (id === 'merge') return 'Merge（聚合模式）';
     const adapter = settingsStore.adaptersMeta.find(a => a.id === id);
-    return adapter?.displayName || id;
+    return adapter?.name || id;
 };
 
 // 实例列表表格列定义

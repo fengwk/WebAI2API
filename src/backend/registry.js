@@ -1,106 +1,71 @@
 /**
- * @fileoverview 适配器注册表
- * @description 自动扫描 adapter/ 目录，加载所有适配器的 manifest，提供统一查询接口。
- *
- * 设计目标：
- * - 新增适配器只需在 adapter/ 目录添加文件，无需修改框架代码
- * - 提供模型查询、策略查询、导航处理器聚合等统一接口
+ * @fileoverview 动态适配器注册表
+ * @description 统一管理 data/adapters 下的动态脚本、provider 元数据与模型查询。
  */
 
-import fs from 'fs';
 import { logger } from '../utils/logger.js';
 import { ensureAdaptersDirSync, listAdapterFiles, importAdapterModule, ADAPTERS_DIR } from './adapterStore.js';
+import { getProvider, hasProvider } from './providers/registry.js';
 
 ensureAdaptersDirSync();
 
-/**
- * 图片输入策略枚举
- */
-export const IMAGE_POLICY = {
-    OPTIONAL: 'optional',
-    REQUIRED: 'required',
-    FORBIDDEN: 'forbidden'
-};
+function createModelDescriptor(modelId) {
+    return {
+        id: modelId,
+        object: 'model',
+        created: Math.floor(Date.now() / 1000),
+        owned_by: 'webai-2api'
+    };
+}
 
-/**
- * 适配器注册表类
- */
 class AdapterRegistry {
     constructor() {
-        /** @type {Map<string, object>} */
         this.adapters = new Map();
-        /** @type {object} 适配器配置（来自 config.yaml） */
         this.adapterConfig = {};
         this.loaded = false;
     }
 
-    /**
-     * 设置适配器配置
-     * @param {object} config - 适配器配置对象
-     */
     setAdapterConfig(config) {
         this.adapterConfig = config || {};
     }
 
-    /**
-     * 检查模型是否启用
-     * @param {string} adapterId - 适配器 ID
-     * @param {string} modelId - 模型 ID
-     * @returns {boolean}
-     */
     isModelEnabled(adapterId, modelId) {
         const adapterCfg = this.adapterConfig[adapterId];
         if (!adapterCfg?.modelFilter) return true;
 
         const { mode, list } = adapterCfg.modelFilter;
-        if (!list || !Array.isArray(list)) return true;
-
+        if (!Array.isArray(list) || list.length === 0) return true;
         const inList = list.includes(modelId);
-
-        if (mode === 'whitelist') {
-            // 白名单模式：只有在列表中的才启用
-            return inList;
-        } else {
-            // 黑名单模式（默认）：在列表中的被禁用
-            return !inList;
-        }
+        return mode === 'whitelist' ? inList : !inList;
     }
 
-    /**
-     * 扫描并加载所有适配器
-     */
     async loadAll() {
         if (this.loaded) return;
 
         logger.info('注册表', `正在扫描适配器目录: ${ADAPTERS_DIR}`);
-
         this.adapters.clear();
         const files = await listAdapterFiles();
 
         for (const file of files) {
             try {
                 const module = await importAdapterModule(file.filePath);
-
-                if (!module.manifest) {
+                const manifest = module.manifest;
+                if (!manifest) {
                     logger.warn('注册表', `跳过 ${file.fileName}: 未导出 manifest`);
                     continue;
                 }
-
-                const manifest = module.manifest;
 
                 if (manifest.id !== file.id) {
                     logger.error('注册表', `${file.fileName} manifest 校验失败: manifest.id 必须与文件名一致 (${file.id})`);
                     continue;
                 }
 
-                // 校验必需字段
                 if (!this.validateManifest(manifest, file.fileName)) {
                     continue;
                 }
 
                 this.adapters.set(manifest.id, manifest);
-                logger.debug('注册表', `已加载适配器: ${manifest.id} (${manifest.displayName || file.fileName})`);
-
+                logger.debug('注册表', `已加载适配器: ${manifest.id} (${manifest.name || file.fileName})`);
             } catch (err) {
                 logger.error('注册表', `加载 ${file.fileName} 失败: ${err.message}`);
             }
@@ -116,240 +81,162 @@ class AdapterRegistry {
         await this.loadAll();
     }
 
-    getManifestErrors(manifest, fileName) {
+    getManifestErrors(manifest) {
         const errors = [];
 
         if (!manifest.id || typeof manifest.id !== 'string') {
             errors.push('缺少 id 或类型不正确');
         }
 
-        if (!manifest.generate || typeof manifest.generate !== 'function') {
-            errors.push('缺少 generate 函数');
+        if (manifest.name !== undefined && typeof manifest.name !== 'string') {
+            errors.push('name 必须是字符串');
         }
 
-        if (!manifest.models || !Array.isArray(manifest.models)) {
-            errors.push('缺少 models 数组');
+        if (!manifest.provider || typeof manifest.provider !== 'object') {
+            errors.push('缺少 provider 配置');
         } else {
-            for (let i = 0; i < manifest.models.length; i++) {
-                const m = manifest.models[i];
-                if (!m.id) {
-                    errors.push(`models[${i}] 缺少 id`);
-                }
-                if (!m.imagePolicy || !Object.values(IMAGE_POLICY).includes(m.imagePolicy)) {
-                    errors.push(`models[${i}] imagePolicy 无效`);
+            if (!manifest.provider.type || typeof manifest.provider.type !== 'string') {
+                errors.push('provider.type 缺失或类型不正确');
+            } else if (!hasProvider(manifest.provider.type)) {
+                errors.push(`未知 provider.type: ${manifest.provider.type}`);
+            }
+
+            if (manifest.provider.models !== undefined) {
+                if (!Array.isArray(manifest.provider.models)) {
+                    errors.push('provider.models 必须是数组');
+                } else {
+                    for (let i = 0; i < manifest.provider.models.length; i++) {
+                        if (!manifest.provider.models[i] || typeof manifest.provider.models[i] !== 'string') {
+                            errors.push(`provider.models[${i}] 必须是非空字符串`);
+                        }
+                    }
                 }
             }
+        }
+
+        if (!manifest.execute || typeof manifest.execute !== 'function') {
+            errors.push('缺少 execute 函数');
+        }
+
+        if (manifest.navigationHandlers !== undefined && !Array.isArray(manifest.navigationHandlers)) {
+            errors.push('navigationHandlers 必须是数组');
+        }
+
+        if (manifest.getTargetUrl !== undefined && typeof manifest.getTargetUrl !== 'function') {
+            errors.push('getTargetUrl 必须是函数');
         }
 
         return errors;
     }
 
-    /**
-     * 校验 manifest 必需字段
-     * @param {object} manifest
-     * @param {string} fileName
-     * @returns {boolean}
-     */
     validateManifest(manifest, fileName) {
-        const errors = this.getManifestErrors(manifest, fileName);
-
+        const errors = this.getManifestErrors(manifest);
         if (errors.length > 0) {
             logger.error('注册表', `${fileName} manifest 校验失败: ${errors.join('; ')}`);
             return false;
         }
-
         return true;
     }
 
-    /**
-     * 获取适配器
-     * @param {string} id - 适配器 ID
-     * @returns {object|null}
-     */
     getAdapter(id) {
         return this.adapters.get(id) || null;
     }
 
-    /**
-     * 获取所有已注册的适配器 ID
-     * @returns {string[]}
-     */
     getAdapterIds() {
         return Array.from(this.adapters.keys());
     }
 
-    /**
-     * 检查适配器是否存在
-     * @param {string} id
-     * @returns {boolean}
-     */
     hasAdapter(id) {
         return this.adapters.has(id);
     }
 
-    /**
-     * 获取适配器的目标 URL
-     * @param {string} id - 适配器 ID
-     * @param {object} config - 全局配置
-     * @param {object} workerConfig - Worker 配置
-     * @returns {string}
-     */
+    getProviderByAdapterId(id) {
+        const adapter = this.getAdapter(id);
+        if (!adapter) return null;
+        return getProvider(adapter.provider.type);
+    }
+
+    getProviderTypeByAdapterId(id) {
+        return this.getAdapter(id)?.provider?.type || null;
+    }
+
     getTargetUrl(id, config, workerConfig) {
         const adapter = this.getAdapter(id);
         if (!adapter) return 'about:blank';
-
         if (typeof adapter.getTargetUrl === 'function') {
             return adapter.getTargetUrl(config, workerConfig) || 'about:blank';
         }
-
         return adapter.targetUrl || 'about:blank';
     }
 
-    /**
-     * 获取适配器的导航处理器
-     * @param {string} id - 适配器 ID
-     * @returns {Function[]}
-     */
     getNavigationHandlers(id) {
         const adapter = this.getAdapter(id);
+        return adapter?.navigationHandlers || [];
+    }
+
+    getAdapterModels(id) {
+        const adapter = this.getAdapter(id);
         if (!adapter) return [];
-        return adapter.navigationHandlers || [];
+        const models = adapter.provider?.models || [];
+        return models.filter(modelId => this.isModelEnabled(id, modelId));
     }
 
-    /**
-     * 获取适配器的输入框就绪校验函数
-     * @param {string} id - 适配器 ID
-     * @returns {Function|null}
-     */
-    getWaitInput(id) {
-        const adapter = this.getAdapter(id);
-        if (!adapter) return null;
-        return adapter.waitInput || null;
-    }
-
-    /**
-     * 获取指定适配器的模型列表 (OpenAI 格式)
-     * @param {string} id - 适配器 ID
-     * @returns {object}
-     */
-    getModelsForAdapter(id) {
-        const adapter = this.getAdapter(id);
-        if (!adapter || !adapter.models) {
-            return { object: 'list', data: [] };
-        }
-
-        const data = adapter.models
-            .filter(m => this.isModelEnabled(id, m.id))
-            .map(m => ({
-                id: m.id,
-                object: 'model',
-                created: Math.floor(Date.now() / 1000),
-                owned_by: id,
-                image_policy: m.imagePolicy,
-                type: m.type || 'image'
-            }));
-
-        return { object: 'list', data };
-    }
-
-    /**
-     * 检查适配器是否支持指定模型
-     * @param {string} adapterId - 适配器 ID
-     * @param {string} modelId - 模型 ID
-     * @returns {boolean}
-     */
-    supportsModel(adapterId, modelId) {
+    supportsTask(adapterId, providerType, modelId) {
         const adapter = this.getAdapter(adapterId);
-        if (!adapter?.models) return false;
-        // 检查模型是否存在且未被禁用
-        const modelExists = adapter.models.some(m => m.id === modelId);
-        return modelExists && this.isModelEnabled(adapterId, modelId);
+        if (!adapter || adapter.provider?.type !== providerType) {
+            return false;
+        }
+
+        const models = adapter.provider?.models || [];
+        if (!modelId) {
+            return models.length > 0;
+        }
+
+        return models.includes(modelId) && this.isModelEnabled(adapterId, modelId);
     }
 
-    /**
-     * 解析模型 ID（保留用于向后兼容）
-     * @param {string} adapterId - 适配器 ID
-     * @param {string} modelKey - 模型 key
-     * @returns {string|null} codeName，或 null
-     * @deprecated 新架构下适配器自己解析，此方法主要用于向后兼容
-     */
-    resolveModelId(adapterId, modelKey) {
-        const adapter = this.getAdapter(adapterId);
-        if (!adapter) return null;
-
-        // 如果适配器还提供了 resolveModelId 函数，调用它
-        if (typeof adapter.resolveModelId === 'function') {
-            return adapter.resolveModelId(modelKey);
+    getDefaultModel(providerType) {
+        for (const [adapterId, adapter] of this.adapters) {
+            if (adapter.provider?.type !== providerType) continue;
+            const models = this.getAdapterModels(adapterId);
+            if (models.length > 0) {
+                return models[0];
+            }
         }
-
-        // 默认行为：查找模型并返回 codeName
-        const model = adapter.models.find(m => m.id === modelKey);
-        if (model) {
-            return model.codeName || model.id;
-        }
-
         return null;
     }
 
-    /**
-     * 获取模型的图片策略
-     * @param {string} adapterId - 适配器 ID
-     * @param {string} modelKey - 模型 key
-     * @returns {string}
-     */
-    getImagePolicy(adapterId, modelKey) {
-        const adapter = this.getAdapter(adapterId);
-        if (!adapter || !adapter.models) {
-            return IMAGE_POLICY.OPTIONAL;
-        }
-
-        const model = adapter.models.find(m => m.id === modelKey);
-        return model?.imagePolicy || IMAGE_POLICY.OPTIONAL;
-    }
-
-    /**
-     * 获取模型的类型
-     * @param {string} adapterId - 适配器 ID
-     * @param {string} modelKey - 模型 key
-     * @returns {string} 'text' | 'image'
-     */
-    getModelType(adapterId, modelKey) {
-        const adapter = this.getAdapter(adapterId);
-        if (!adapter || !adapter.models) {
-            return 'image';
-        }
-
-        const model = adapter.models.find(m => m.id === modelKey);
-        return model?.type || 'image';
-    }
-
-    /**
-     * 聚合所有适配器的模型列表
-     * @returns {object}
-     */
-    getAllModels() {
-        const allModels = [];
-
-        for (const [id, adapter] of this.adapters) {
-            if (adapter.models) {
-                for (const m of adapter.models) {
-                    allModels.push({
-                        id: m.id,
-                        object: 'model',
-                        created: Math.floor(Date.now() / 1000),
-                        owned_by: id,
-                        image_policy: m.imagePolicy,
-                        type: m.type || 'image'
-                    });
-                }
+    hasModel(providerType, modelId) {
+        for (const [adapterId, adapter] of this.adapters) {
+            if (adapter.provider?.type !== providerType) continue;
+            if (this.getAdapterModels(adapterId).includes(modelId)) {
+                return true;
             }
         }
+        return false;
+    }
 
-        return { object: 'list', data: allModels };
+    getModelsForAdapter(id) {
+        return {
+            object: 'list',
+            data: this.getAdapterModels(id).map(createModelDescriptor)
+        };
+    }
+
+    getAllModels() {
+        const seen = new Set();
+        const data = [];
+        for (const adapterId of this.adapters.keys()) {
+            for (const modelId of this.getAdapterModels(adapterId)) {
+                if (seen.has(modelId)) continue;
+                seen.add(modelId);
+                data.push(createModelDescriptor(modelId));
+            }
+        }
+        return { object: 'list', data };
     }
 }
 
-// 导出单例
 const registry = new AdapterRegistry();
 
 export { AdapterRegistry, registry };

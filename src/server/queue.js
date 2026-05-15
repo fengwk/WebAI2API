@@ -4,13 +4,13 @@
  */
 
 import { logger } from '../utils/logger.js';
+import path from 'path';
 import {
     sendJson,
     sendSse,
     sendSseDone,
     sendHeartbeat,
     sendApiError,
-    buildChatCompletion,
     buildChatCompletionChunk
 } from './respond.js';
 import { ERROR_CODES } from './errors.js';
@@ -21,8 +21,9 @@ import { createRecord, updateRecord, processResponseMedia } from '../utils/histo
  * @typedef {object} TaskContext
  * @property {import('http').IncomingMessage} req - HTTP 请求对象
  * @property {import('http').ServerResponse} res - HTTP 响应对象
- * @property {string} prompt - 用户提示词
- * @property {string[]} imagePaths - 图片路径列表
+ * @property {string} providerType - Provider 类型
+ * @property {object} provider - Provider 定义
+ * @property {object} input - 归一化输入
  * @property {string|null} modelId - 模型 ID
  * @property {string|null} modelName - 模型名称
  * @property {string} id - 请求唯一标识
@@ -55,7 +56,7 @@ import { createRecord, updateRecord, processResponseMedia } from '../utils/histo
  */
 export function createQueueManager(queueConfig, callbacks) {
     const { maxConcurrent, queueBuffer, keepaliveMode } = queueConfig;
-    const { initBrowser, generate, config, navigateToMonitor, getCookies } = callbacks;
+    const { initBrowser, executeTask, config, navigateToMonitor, getCookies } = callbacks;
 
     // 计算有效队列大小：0 表示不限制，否则为 maxConcurrent + buffer
     const effectiveQueueSize = queueBuffer === 0 ? Infinity : (maxConcurrent + queueBuffer);
@@ -77,9 +78,9 @@ export function createQueueManager(queueConfig, callbacks) {
      * @param {TaskContext} task - 任务上下文
      */
     async function cleanupTask(task) {
-        if (task?.imagePaths) {
+        if (task?.cleanupPaths?.length) {
             const fs = await import('fs/promises');
-            for (const p of task.imagePaths) {
+            for (const p of task.cleanupPaths) {
                 try {
                     await fs.unlink(p);
                 } catch (e) {
@@ -94,7 +95,7 @@ export function createQueueManager(queueConfig, callbacks) {
      * @param {TaskContext} task - 任务上下文
      */
     async function processTask(task) {
-        const { res, prompt, imagePaths, modelId, modelName, id, isStreaming, reasoning } = task;
+        const { res, provider, providerType, input, modelId, modelName, id, isStreaming, promptText, inputFiles } = task;
         const startTime = Date.now();
 
         logger.info('服务器', '[队列] 开始处理任务', { id, remaining: queue.length });
@@ -103,10 +104,11 @@ export function createQueueManager(queueConfig, callbacks) {
         try {
             createRecord({
                 id,
+                providerType,
                 modelId,
                 modelName,
-                prompt,
-                inputImages: imagePaths,
+                prompt: promptText,
+                inputImages: inputFiles,
                 isStreaming,
                 status: 'pending'
             });
@@ -132,20 +134,29 @@ export function createQueueManager(queueConfig, callbacks) {
                 poolContext = await initBrowser(config);
             }
 
-            // 调用核心生图逻辑 (通过 Pool 分发)
-            const result = await generate(poolContext, prompt, imagePaths, modelId, { id, reasoning });
+            const fileOutput = {
+                rootDir: path.join(process.cwd(), 'data', 'files', 'responses', id),
+                urlBasePath: `/files/responses/${encodeURIComponent(id)}`
+            };
+
+            const result = await executeTask(poolContext, {
+                providerType,
+                modelId,
+                input,
+                fileOutput
+            }, { id });
 
             // 清除心跳
             if (heartbeatInterval) clearInterval(heartbeatInterval);
 
             // 处理结果
-            if (result.error) {
+            if (!result.success) {
                 // 生成失败：记录统计和历史
                 await incrementFailed();
                 try {
                     updateRecord(id, {
                         status: 'failed',
-                        errorMessage: result.error,
+                        errorMessage: result.error?.message || '执行失败',
                         durationMs: Date.now() - startTime
                     });
                 } catch (e) {
@@ -153,48 +164,36 @@ export function createQueueManager(queueConfig, callbacks) {
                 }
                 sendApiError(res, {
                     code: ERROR_CODES.GENERATION_FAILED,
-                    message: result.error,
-                    status: result.retryable ? 503 : 502,
+                    message: result.error?.message || '执行失败',
+                    status: result.error?.retryable ? 503 : 502,
                     isStreaming
                 });
                 return;
             }
 
-            // 生成成功
-            let finalContent = '';
-            let reasoningContent = null;  // 思考过程内容
-            let historyResponseText = '';  // 历史记录中存储的文本（不含 base64）
+            const responseDescriptor = await provider.buildSuccessResponse({
+                modelName,
+                input,
+                result: result.data,
+                stream: isStreaming
+            });
 
-            if (result.image) {
-                // 判断是否开启 Markdown 格式
-                const imageMarkdown = config?.server?.imageMarkdown || false;
-                if (imageMarkdown) {
-                    finalContent = `![generated](${result.image})`;
-                } else {
-                    finalContent = result.image;
-                }
-                // 历史记录只存原始 URL，不存 base64
-                historyResponseText = result.imageUrl || '';
-            } else {
-                finalContent = result.text || '生成失败';
-                historyResponseText = result.text || '';
-            }
-
-            // 提取思考过程（如果有）
-            if (result.reasoning) {
-                reasoningContent = result.reasoning;
-            }
+            const history = await provider.buildHistory({
+                modelName,
+                input,
+                result: result.data
+            });
 
             logger.info('服务器', '结果已准备就绪', { id });
             await incrementSuccess();
 
             // 更新历史记录（异步处理媒体，不阻塞响应）
-            processResponseMedia(result, id).then(responseMedia => {
+            processResponseMedia(history.responseMediaSource, id).then(responseMedia => {
                 try {
                     updateRecord(id, {
                         status: 'success',
-                        responseText: historyResponseText,
-                        reasoningContent,
+                        responseText: history.responseText,
+                        reasoningContent: history.reasoningContent,
                         responseMedia,
                         durationMs: Date.now() - startTime
                     });
@@ -206,16 +205,28 @@ export function createQueueManager(queueConfig, callbacks) {
             });
 
             // 发送成功响应
-            logger.info('服务器', '准备发送响应...', { id, isStreaming, contentLength: finalContent.length, hasReasoning: !!reasoningContent });
-            if (isStreaming) {
-                const chunk = buildChatCompletionChunk(finalContent, modelName, 'stop', reasoningContent);
-                sendSse(res, chunk);
-                sendSseDone(res);
-                logger.info('服务器', '流式响应已结束', { id });
+            if (responseDescriptor.responseType === 'chat') {
+                logger.info('服务器', '准备发送聊天响应...', {
+                    id,
+                    isStreaming,
+                    contentLength: responseDescriptor.content.length,
+                    hasReasoning: !!responseDescriptor.reasoningContent
+                });
+                if (isStreaming) {
+                    const chunk = buildChatCompletionChunk(
+                        responseDescriptor.content,
+                        modelName,
+                        'stop',
+                        responseDescriptor.reasoningContent
+                    );
+                    sendSse(res, chunk);
+                    sendSseDone(res);
+                } else {
+                    sendJson(res, 200, responseDescriptor.body);
+                }
             } else {
-                const response = buildChatCompletion(finalContent, modelName, reasoningContent);
-                sendJson(res, 200, response);
-                logger.info('服务器', 'JSON 响应已发送', { id });
+                logger.info('服务器', '准备发送 JSON 响应...', { id, providerType });
+                sendJson(res, responseDescriptor.status || 200, responseDescriptor.body);
             }
 
         } catch (err) {
@@ -363,6 +374,7 @@ export function createQueueManager(queueConfig, callbacks) {
         canAcceptNonStreaming,
         initializePool,
         getPoolContext,
-        getWorkerCookies
+        getWorkerCookies,
+        maxQueueSize: effectiveQueueSize
     };
 }

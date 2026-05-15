@@ -33,6 +33,7 @@ export async function initHistoryDb() {
         CREATE TABLE IF NOT EXISTS requests (
             id TEXT PRIMARY KEY,
             created_at INTEGER NOT NULL,
+            provider_type TEXT,
             model_id TEXT,
             model_name TEXT,
             prompt TEXT,
@@ -49,6 +50,10 @@ export async function initHistoryDb() {
         CREATE INDEX IF NOT EXISTS idx_status ON requests(status);
         CREATE INDEX IF NOT EXISTS idx_model_id ON requests(model_id);
     `);
+
+    try {
+        db.exec('ALTER TABLE requests ADD COLUMN provider_type TEXT');
+    } catch { }
 
     logger.info('历史记录', '数据库初始化完成');
     return db;
@@ -73,13 +78,14 @@ function getDb() {
 export function createRecord(data) {
     const db = getDb();
     const stmt = db.prepare(`
-        INSERT INTO requests (id, created_at, model_id, model_name, prompt, input_images, status, is_streaming)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO requests (id, created_at, provider_type, model_id, model_name, prompt, input_images, status, is_streaming)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
         data.id,
         Date.now(),
+        data.providerType || null,
         data.modelId || null,
         data.modelName || null,
         data.prompt || null,
@@ -332,6 +338,30 @@ export async function saveMediaToFile(dataUri, requestId, originalUrl = null) {
     return result;
 }
 
+async function saveLocalFileToHistory(filePath, requestId, originalUrl = null, mimeType = null) {
+    const result = {
+        type: mimeType?.startsWith('video/') ? 'video' : 'image',
+        originalUrl,
+        localPath: null,
+        status: 'pending'
+    };
+
+    try {
+        const ext = path.extname(filePath) || '.bin';
+        const filename = `${requestId}_${Date.now()}${ext}`;
+        const targetPath = path.join(MEDIA_DIR, filename);
+        await fs.copyFile(filePath, targetPath);
+        result.localPath = targetPath;
+        result.status = 'downloaded';
+        logger.debug('历史记录', `媒体文件已复制归档: ${filename}`);
+    } catch (error) {
+        logger.error('历史记录', `复制归档文件失败: ${error.message}`);
+        result.status = 'failed';
+    }
+
+    return result;
+}
+
 /**
  * 处理响应中的媒体内容
  * @param {object} result - 生成结果 {text, image, imageUrl, reasoning}
@@ -340,6 +370,39 @@ export async function saveMediaToFile(dataUri, requestId, originalUrl = null) {
  */
 export async function processResponseMedia(result, requestId) {
     const media = [];
+
+    const images = result?.data?.images;
+    if (Array.isArray(images)) {
+        for (const image of images) {
+            if (image?.file?.absolutePath) {
+                const mediaInfo = await saveLocalFileToHistory(
+                    image.file.absolutePath,
+                    requestId,
+                    image.file.url || image.url || null,
+                    image.file.mimeType || null
+                );
+                media.push(mediaInfo);
+                continue;
+            }
+
+            if (image?.b64_json) {
+                const mimeType = image?.file?.mimeType || 'image/png';
+                const dataUri = `data:${mimeType};base64,${image.b64_json}`;
+                media.push(await saveMediaToFile(dataUri, requestId, image?.url || null));
+                continue;
+            }
+
+            if (image?.url) {
+                media.push({
+                    type: 'image',
+                    originalUrl: image.url,
+                    localPath: null,
+                    status: 'external'
+                });
+            }
+        }
+        return media;
+    }
 
     // 处理直接返回的图片/视频（带原始 URL）
     if (result.image) {

@@ -9,8 +9,11 @@ async function waitForComposer(page, timeout = 30000) {
   await page.waitForSelector(INPUT_SELECTOR, { timeout });
 }
 
-async function uploadFiles(page, imagePaths) {
-  if (!imagePaths?.length) return;
+async function uploadFiles(page, images) {
+  if (!images?.length) return;
+
+  const imagePaths = images.map(image => image.path).filter(Boolean);
+  if (imagePaths.length === 0) return;
 
   const buttonCandidates = [
     page.getByRole('button', { name: /Add files and more/i }),
@@ -40,18 +43,20 @@ async function uploadFiles(page, imagePaths) {
   throw new Error('未找到可用的图片上传入口');
 }
 
-async function downloadAsDataUrl(page, url, timeout = 120000) {
-  const resp = await page.request.get(url, { timeout });
+async function downloadImage(api, page, url) {
+  const resp = await page.request.get(url, { timeout: 120000 });
   if (!resp.ok()) {
     throw new Error(`图片下载失败: HTTP ${resp.status()}`);
   }
+
   const buffer = await resp.body();
   const contentType = resp.headers()['content-type'] || 'image/png';
   const mimeType = contentType.split(';')[0].trim();
-  return {
-    image: `data:${mimeType};base64,${buffer.toString('base64')}`,
-    imageUrl: url
-  };
+  return await api.saveFile({
+    relativePath: 'chatgpt/result.png',
+    content: buffer,
+    mimeType
+  });
 }
 
 function extractConversationText(conversationBody) {
@@ -87,37 +92,48 @@ function extractConversationText(conversationBody) {
   return text;
 }
 
+function buildPrompt(input) {
+  const prompt = String(input.prompt || '').trim();
+  const size = String(input.size || '').trim();
+  if (!size) return prompt;
+  return `${prompt}\n\n将宽高比设置为 ${size}`;
+}
+
 export const manifest = {
-  id: 'chatgpt_image',
-  displayName: 'ChatGPT Image',
-  description: 'ChatGPT 图片生成动态适配器，默认目标模型为 gpt-image-2。',
-  models: [
-    { id: 'gpt-image-2', imagePolicy: 'optional', type: 'image' }
-  ],
+  id: 'chatgpt_image_generate',
+  name: 'ChatGPT Image Generate',
+  provider: {
+    type: 'openai-images-generations',
+    models: ['gpt-image-2']
+  },
   navigationHandlers: [],
   getTargetUrl() {
     return TARGET_URL;
   },
-
-  async generate(ctx, prompt, imagePaths, modelId, meta) {
+  async execute(ctx, input) {
     const { page, api, config } = ctx;
     const waitTimeout = config?.backend?.pool?.waitTimeout ?? 300000;
+    const prompt = buildPrompt(input);
+    const images = input.images || [];
 
-    api.log('info', '打开 ChatGPT 图片页面', { modelId, promptLength: prompt.length, imageCount: imagePaths.length, ...meta });
+    api.log('info', '打开 ChatGPT 图片页面', {
+      model: input.model,
+      promptLength: prompt.length,
+      imageCount: images.length
+    });
+
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await waitForComposer(page);
 
-    if (imagePaths.length > 0) {
-      api.log('info', '开始上传参考图片', { count: imagePaths.length, ...meta });
-      await uploadFiles(page, imagePaths);
+    if (images.length > 0) {
+      api.log('info', '开始上传参考图片', { count: images.length });
+      await uploadFiles(page, images);
       await sleep(3000);
     }
 
     const composer = page.locator(INPUT_SELECTOR).first();
     await composer.click({ timeout: 10000 });
     await page.keyboard.insertText(prompt);
-
-    api.log('info', '发送提示词', meta);
     await page.keyboard.press('Enter');
 
     const conversationResponse = await page.waitForResponse((response) => {
@@ -125,7 +141,13 @@ export const manifest = {
     }, { timeout: waitTimeout });
 
     if (conversationResponse.status() !== 200) {
-      return { error: `API 返回错误: HTTP ${conversationResponse.status()}` };
+      return {
+        success: false,
+        error: {
+          message: `API 返回错误: HTTP ${conversationResponse.status()}`,
+          retryable: true
+        }
+      };
     }
 
     const conversationBody = await conversationResponse.text();
@@ -137,21 +159,31 @@ export const manifest = {
         conversationBody.includes('rate limit') ||
         /limit.*reset/i.test(conversationText);
       if (isRateLimit) {
-        return { error: `触发速率限制: ${conversationText.substring(0, 200)}`, retryable: false };
+        return {
+          success: false,
+          error: {
+            message: `触发速率限制: ${conversationText.substring(0, 200)}`,
+            retryable: false
+          }
+        };
       }
 
       if (!isImageGenerationStarted) {
         const isContentRejection = /cannot|can't|unable|sorry|policy|violat/i.test(conversationText);
         if (isContentRejection) {
-          return { error: `内容被拒绝: ${conversationText.substring(0, 200)}`, retryable: false };
+          return {
+            success: false,
+            error: {
+              message: `内容被拒绝: ${conversationText.substring(0, 200)}`,
+              retryable: false
+            }
+          };
         }
       }
     }
 
-    api.log('info', '等待图片下载链接', meta);
     const imageTimeout = isImageGenerationStarted ? 120000 : 30000;
     let downloadUrl = null;
-
     try {
       await page.waitForResponse(async (response) => {
         const url = response.url();
@@ -171,16 +203,44 @@ export const manifest = {
       }, { timeout: imageTimeout });
     } catch {
       if (conversationText) {
-        return { error: `模型返回文本而非图片: ${conversationText.substring(0, 200)}`, retryable: false };
+        return {
+          success: false,
+          error: {
+            message: `模型返回文本而非图片: ${conversationText.substring(0, 200)}`,
+            retryable: false
+          }
+        };
       }
-      return { error: '等待图片生成超时' };
+      return {
+        success: false,
+        error: {
+          message: '等待图片生成超时',
+          retryable: true
+        }
+      };
     }
 
     if (!downloadUrl) {
-      return { error: '未获取到图片下载链接' };
+      return {
+        success: false,
+        error: {
+          message: '未获取到图片下载链接',
+          retryable: true
+        }
+      };
     }
 
-    api.log('info', '开始下载图片', { downloadUrl, ...meta });
-    return await downloadAsDataUrl(page, downloadUrl);
+    const file = await downloadImage(api, page, downloadUrl);
+    return {
+      success: true,
+      data: {
+        created: Math.floor(Date.now() / 1000),
+        images: [
+          {
+            file
+          }
+        ]
+      }
+    };
   }
 };

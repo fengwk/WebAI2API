@@ -10,7 +10,11 @@
 		"start": "node supervisor.js",
 		"genkey": "node scripts/genkey.js",
 		"init": "node scripts/init.js",
-		"postinstall": "node scripts/postinstall.js"
+		"postinstall": "node scripts/postinstall.js",
+		"test": "node --test tests/unit/*.test.js tests/mock/*.test.js",
+		"test:unit": "node --test tests/unit/*.test.js",
+		"test:mock": "node --test tests/mock/*.test.js",
+		"build:webui": "npm --prefix webui install --package-lock=false && npm --prefix webui run build"
 	},
 	"imports": {
 		"#config": "./src/config/index.js",
