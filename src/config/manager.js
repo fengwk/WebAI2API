@@ -185,7 +185,10 @@ export function getInstancesConfig() {
             enable: inst.proxy.enable || false,
             type: inst.proxy.type || 'http',
             host: inst.proxy.host || '',
-            port: inst.proxy.port || 0
+            port: inst.proxy.port || 0,
+            auth: !!(inst.proxy.user || inst.proxy.passwd),
+            username: inst.proxy.user || '',
+            password: inst.proxy.passwd || ''
         } : null,
         workers: (inst.workers || []).map(w => ({
             name: w.name,

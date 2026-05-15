@@ -1,226 +1,349 @@
 <script setup>
-import { ref, onMounted, reactive, computed } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
+import { Modal, message } from 'ant-design-vue';
 import { useSettingsStore } from '@/stores/settings';
-import { message } from 'ant-design-vue';
-import { SettingOutlined, AppstoreOutlined } from '@ant-design/icons-vue';
 
 const settingsStore = useSettingsStore();
 
-const drawerVisible = ref(false);
-const currentAdapter = ref(null);
-const currentConfig = reactive({});
+const loadingList = ref(false);
+const loadingSource = ref(false);
+const saving = ref(false);
+const testing = ref(false);
 
-// 模型过滤配置
-const modelFilter = reactive({
-    mode: 'blacklist',
-    list: []
+const selectedAdapterId = ref('');
+const sourceCode = ref('');
+
+const createVisible = ref(false);
+const newAdapterId = ref('');
+const testImages = ref([]);
+
+const testForm = ref({
+    workerName: '',
+    modelId: '',
+    prompt: 'test'
 });
 
-// 挂载时获取数据
+const testResult = ref(null);
+
+const adapters = computed(() => settingsStore.adaptersMeta);
+const selectedAdapter = computed(() => adapters.value.find(a => a.id === selectedAdapterId.value) || null);
+const availableWorkers = computed(() => {
+    const workers = [];
+    for (const instance of settingsStore.workerConfig || []) {
+        for (const worker of instance.workers || []) {
+            workers.push({
+                label: `${worker.name}${instance.name ? ` (${instance.name})` : ''}`,
+                value: worker.name
+            });
+        }
+    }
+    return workers;
+});
+
+function buildTemplate(adapterId) {
+    return `export const manifest = {
+  id: '${adapterId}',
+  displayName: '${adapterId}',
+  description: 'dynamic adapter',
+  models: [
+    { id: '${adapterId}-model', imagePolicy: 'optional', type: 'image' }
+  ],
+  navigationHandlers: [],
+
+  async generate(ctx, prompt, imagePaths, modelId, meta) {
+    const { page, context, api } = ctx;
+
+    api.log('info', '开始执行动态适配器', { modelId, promptLength: prompt.length, imageCount: imagePaths.length });
+
+    await page.goto('https://example.com');
+
+    return { error: '请编辑脚本后再测试' };
+  }
+};
+`;
+}
+
+const fileToBase64 = (file) => {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+    });
+};
+
+const beforeUpload = (file) => {
+    const allowedTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+    if (!allowedTypes.includes(file.type)) {
+        message.error('仅支持 PNG, JPEG, GIF, WebP 格式');
+        return false;
+    }
+    if (testImages.value.length >= 10) {
+        message.error('最多上传 10 张图片');
+        return false;
+    }
+    return false;
+};
+
+const handleImageChange = async (info) => {
+    const file = info.file;
+    if (file.status === 'removed') {
+        testImages.value = testImages.value.filter(f => f.uid !== file.uid);
+        return;
+    }
+    try {
+        const base64 = await fileToBase64(file.originFileObj || file);
+        testImages.value.push({ uid: file.uid, name: file.name, base64 });
+    } catch {
+        message.error('图片读取失败');
+    }
+};
+
+async function refreshAdapters() {
+    loadingList.value = true;
+    try {
+        await settingsStore.fetchAdaptersMeta();
+        if (!selectedAdapterId.value && adapters.value.length > 0) {
+            selectedAdapterId.value = adapters.value[0].id;
+        } else if (selectedAdapterId.value && !adapters.value.some(a => a.id === selectedAdapterId.value)) {
+            selectedAdapterId.value = adapters.value[0]?.id || '';
+        }
+    } finally {
+        loadingList.value = false;
+    }
+}
+
+async function loadSource(adapterId) {
+    if (!adapterId) {
+        sourceCode.value = '';
+        return;
+    }
+    loadingSource.value = true;
+    try {
+        sourceCode.value = await settingsStore.fetchAdapterSource(adapterId);
+        testResult.value = null;
+    } catch (e) {
+        message.error(e.message);
+        sourceCode.value = '';
+    } finally {
+        loadingSource.value = false;
+    }
+}
+
+async function handleSave() {
+    if (!selectedAdapterId.value) return;
+    saving.value = true;
+    try {
+        await settingsStore.saveAdapterSource(selectedAdapterId.value, sourceCode.value);
+        await refreshAdapters();
+        await loadSource(selectedAdapterId.value);
+    } catch (e) {
+        Modal.error({ title: '保存失败', content: e.message });
+    } finally {
+        saving.value = false;
+    }
+}
+
+function openCreateModal() {
+    newAdapterId.value = '';
+    createVisible.value = true;
+}
+
+async function handleCreate() {
+    const adapterId = newAdapterId.value.trim();
+    if (!adapterId) {
+        message.warning('请输入适配器 ID');
+        return;
+    }
+    try {
+        await settingsStore.saveAdapterSource(adapterId, buildTemplate(adapterId));
+        createVisible.value = false;
+        await refreshAdapters();
+        selectedAdapterId.value = adapterId;
+    } catch (e) {
+        Modal.error({ title: '创建失败', content: e.message });
+    }
+}
+
+function handleDelete() {
+    if (!selectedAdapterId.value) return;
+    Modal.confirm({
+        title: '删除适配器脚本',
+        content: `确定要删除 ${selectedAdapterId.value} 吗？`,
+        okText: '删除',
+        okType: 'danger',
+        cancelText: '取消',
+        async onOk() {
+            try {
+                const currentId = selectedAdapterId.value;
+                await settingsStore.deleteAdapterSource(currentId);
+                selectedAdapterId.value = '';
+                sourceCode.value = '';
+                testResult.value = null;
+                await refreshAdapters();
+            } catch (e) {
+                Modal.error({ title: '删除失败', content: e.message });
+            }
+        }
+    });
+}
+
+async function handleTest() {
+    if (!selectedAdapterId.value) return;
+    testing.value = true;
+    testResult.value = null;
+    try {
+        testResult.value = await settingsStore.testAdapter(selectedAdapterId.value, {
+            workerName: testForm.value.workerName || null,
+            modelId: testForm.value.modelId || null,
+            prompt: testForm.value.prompt || '',
+            images: testImages.value.map(item => item.base64)
+        });
+        if (testResult.value.success) {
+            message.success('测试执行完成');
+        } else {
+            message.warning('测试执行返回错误');
+        }
+    } catch (e) {
+        testResult.value = { success: false, result: { error: e.message } };
+        message.error(e.message);
+    } finally {
+        testing.value = false;
+    }
+}
+
+watch(selectedAdapterId, async (id) => {
+    await loadSource(id);
+    const adapter = adapters.value.find(a => a.id === id);
+    if (adapter?.models?.length === 1) {
+        testForm.value.modelId = adapter.models[0];
+    } else if (!adapter?.models?.includes(testForm.value.modelId)) {
+        testForm.value.modelId = adapter?.models?.[0] || '';
+    }
+});
+
 onMounted(async () => {
     await Promise.all([
-        settingsStore.fetchAdaptersMeta(),
-        settingsStore.fetchAdapterConfig()
+        refreshAdapters(),
+        settingsStore.fetchWorkerConfig()
     ]);
+    if (availableWorkers.value.length > 0 && !testForm.value.workerName) {
+        testForm.value.workerName = availableWorkers.value[0].value;
+    }
 });
-
-// 适配器列表
-const adapters = computed(() => settingsStore.adaptersMeta);
-
-// 检查模型是否启用
-const isModelEnabled = (modelId) => {
-    const inList = modelFilter.list.includes(modelId);
-    if (modelFilter.mode === 'whitelist') {
-        return inList;
-    } else {
-        return !inList;
-    }
-};
-
-// 切换模型启用/禁用
-const toggleModel = (modelId, enabled) => {
-    const idx = modelFilter.list.indexOf(modelId);
-
-    if (modelFilter.mode === 'whitelist') {
-        // 白名单模式：启用=加入列表，禁用=移出列表
-        if (enabled && idx === -1) {
-            modelFilter.list.push(modelId);
-        } else if (!enabled && idx !== -1) {
-            modelFilter.list.splice(idx, 1);
-        }
-    } else {
-        // 黑名单模式：禁用=加入列表，启用=移出列表
-        if (!enabled && idx === -1) {
-            modelFilter.list.push(modelId);
-        } else if (enabled && idx !== -1) {
-            modelFilter.list.splice(idx, 1);
-        }
-    }
-};
-
-// 切换模式时重置列表
-const onModeChange = (newMode) => {
-    if (newMode !== modelFilter.mode) {
-        modelFilter.mode = newMode;
-        modelFilter.list = [];
-    }
-};
-
-// 打开抽屉进行编辑
-const handleEdit = (adapter) => {
-    currentAdapter.value = adapter;
-    // 加载现有配置或默认值
-    const existing = settingsStore.adapterConfig[adapter.id] || {};
-
-    // 重置当前配置表单
-    Object.keys(currentConfig).forEach(key => delete currentConfig[key]);
-
-    // 使用现有值或schema中的默认值初始化表单
-    if (adapter.configSchema) {
-        adapter.configSchema.forEach(field => {
-            if (existing[field.key] !== undefined) {
-                currentConfig[field.key] = existing[field.key];
-            } else {
-                currentConfig[field.key] = field.default;
-            }
-        });
-    }
-
-    // 初始化模型过滤配置
-    const filter = adapter.modelFilter || { mode: 'blacklist', list: [] };
-    modelFilter.mode = filter.mode || 'blacklist';
-    modelFilter.list = [...(filter.list || [])];
-
-    drawerVisible.value = true;
-};
-
-// 保存配置
-const handleSave = async () => {
-    if (!currentAdapter.value) return;
-
-    const configToSave = {
-        [currentAdapter.value.id]: {
-            ...currentConfig,
-            modelFilter: {
-                mode: modelFilter.mode,
-                list: [...modelFilter.list]
-            }
-        }
-    };
-
-    const success = await settingsStore.saveAdapterConfig(configToSave);
-    if (success) {
-        // 更新本地缓存
-        const adapter = settingsStore.adaptersMeta.find(a => a.id === currentAdapter.value.id);
-        if (adapter) {
-            adapter.modelFilter = { mode: modelFilter.mode, list: [...modelFilter.list] };
-        }
-        drawerVisible.value = false;
-    }
-};
 </script>
 
 <template>
-    <a-layout style="background: transparent;">
-        <a-card title="适配器管理" :bordered="false">
-            <template #extra>
-                <a-button type="link" @click="settingsStore.fetchAdaptersMeta">刷新列表</a-button>
-            </template>
+    <a-layout style="background: transparent; gap: 16px;">
+        <a-row :gutter="16">
+            <a-col :xs="24" :lg="7">
+                <a-card title="适配器脚本" :bordered="false">
+                    <template #extra>
+                        <a-space>
+                            <a-button type="link" @click="refreshAdapters" :loading="loadingList">刷新</a-button>
+                            <a-button type="primary" size="small" @click="openCreateModal">新建</a-button>
+                        </a-space>
+                    </template>
 
-            <a-list :grid="{ gutter: 16, xs: 1, sm: 2, md: 3, lg: 3, xl: 4, xxl: 4 }" :data-source="adapters">
-                <template #renderItem="{ item }">
-                    <a-list-item>
-                        <a-card hoverable @click="handleEdit(item)" :bodyStyle="{ padding: '12px 16px' }">
-                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-                                <div style="display: flex; align-items: center; min-width: 0; flex: 1;">
-                                    <AppstoreOutlined
-                                        style="font-size: 18px; color: #1890ff; margin-right: 8px; flex-shrink: 0;" />
-                                    <span
-                                        style="font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{
-                                            item.id }}</span>
+                    <a-empty v-if="adapters.length === 0" description="暂无适配器脚本，请先新建" />
+
+                    <a-list v-else :data-source="adapters" size="small" bordered>
+                        <template #renderItem="{ item }">
+                            <a-list-item @click="selectedAdapterId = item.id"
+                                :style="{ cursor: 'pointer', background: selectedAdapterId === item.id ? '#e6f4ff' : '' }">
+                                <div style="width: 100%;">
+                                    <div style="display: flex; justify-content: space-between; gap: 8px; align-items: center;">
+                                        <span style="font-weight: 600; word-break: break-all;">{{ item.id }}</span>
+                                        <a-tag :color="item.valid ? 'success' : 'error'">{{ item.valid ? '有效' : '无效' }}</a-tag>
+                                    </div>
+                                    <div style="font-size: 12px; color: #8c8c8c; margin-top: 4px;">
+                                        {{ item.displayName || item.id }}
+                                    </div>
+                                    <div v-if="item.error" style="font-size: 12px; color: #ff4d4f; margin-top: 4px; word-break: break-all;">
+                                        {{ item.error }}
+                                    </div>
                                 </div>
-                                <SettingOutlined style="font-size: 16px; color: #8c8c8c; flex-shrink: 0;" />
+                            </a-list-item>
+                        </template>
+                    </a-list>
+                </a-card>
+            </a-col>
+
+            <a-col :xs="24" :lg="17">
+                <a-card :title="selectedAdapterId ? `编辑脚本 - ${selectedAdapterId}` : '适配器脚本编辑器'" :bordered="false">
+                    <template #extra>
+                        <a-space>
+                            <a-button danger @click="handleDelete" :disabled="!selectedAdapterId">删除</a-button>
+                            <a-button type="primary" @click="handleSave" :loading="saving" :disabled="!selectedAdapterId">保存</a-button>
+                        </a-space>
+                    </template>
+
+                    <a-empty v-if="!selectedAdapterId" description="请选择或创建一个适配器脚本" />
+                    <template v-else>
+                        <div v-if="selectedAdapter?.description" style="margin-bottom: 12px; color: #8c8c8c;">
+                            {{ selectedAdapter.description }}
+                        </div>
+
+                        <a-textarea v-model:value="sourceCode" :auto-size="{ minRows: 24, maxRows: 32 }" :disabled="loadingSource"
+                            style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;" />
+
+                        <a-divider />
+
+                        <div style="font-weight: 600; margin-bottom: 12px;">测试执行</div>
+                        <a-row :gutter="12">
+                            <a-col :xs="24" :md="8">
+                                <div style="margin-bottom: 6px; font-size: 12px; color: #8c8c8c;">Worker</div>
+                                <a-select v-model:value="testForm.workerName" style="width: 100%;" :options="availableWorkers" />
+                            </a-col>
+                            <a-col :xs="24" :md="8">
+                                <div style="margin-bottom: 6px; font-size: 12px; color: #8c8c8c;">模型</div>
+                                <a-select v-model:value="testForm.modelId" style="width: 100%;"
+                                    :options="(selectedAdapter?.models || []).map(m => ({ label: m, value: m }))"
+                                    :disabled="(selectedAdapter?.models || []).length <= 1" />
+                            </a-col>
+                            <a-col :xs="24" :md="8" style="display: flex; align-items: flex-end; justify-content: flex-end;">
+                                <a-button type="primary" @click="handleTest" :loading="testing" :disabled="!selectedAdapterId || !testForm.workerName">
+                                    测试执行
+                                </a-button>
+                            </a-col>
+                        </a-row>
+
+                        <div style="margin-top: 12px;">
+                            <div style="margin-bottom: 6px; font-size: 12px; color: #8c8c8c;">Prompt</div>
+                            <a-textarea v-model:value="testForm.prompt" :rows="4" />
+                        </div>
+
+                        <div style="margin-top: 12px;">
+                            <div style="margin-bottom: 6px; font-size: 12px; color: #8c8c8c;">测试图片 ({{ testImages.length }}/10)</div>
+                            <a-upload-dragger :file-list="[]" :multiple="true" :before-upload="beforeUpload" @change="handleImageChange"
+                                accept=".png,.jpg,.jpeg,.gif,.webp" :show-upload-list="false" style="padding: 8px;">
+                                <p style="font-size: 12px; margin: 0; color: #8c8c8c;">点击或拖拽上传图片用于测试</p>
+                            </a-upload-dragger>
+                            <div v-if="testImages.length > 0" style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px;">
+                                <a-tag v-for="img in testImages" :key="img.uid" closable
+                                    @close="testImages = testImages.filter(i => i.uid !== img.uid)">
+                                    {{ img.name.slice(0, 15) }}{{ img.name.length > 15 ? '...' : '' }}
+                                </a-tag>
                             </div>
-                        </a-card>
-                    </a-list-item>
-                </template>
-            </a-list>
-        </a-card>
+                        </div>
 
-        <!-- 配置抽屉 -->
-        <a-drawer v-if="currentAdapter" v-model:open="drawerVisible" :title="`配置适配器 - ${currentAdapter.id}`" width="500"
-            placement="right">
-            <!-- 适配器描述 -->
-            <div v-if="currentAdapter.description"
-                style="margin-bottom: 16px; padding: 12px; background: #f5f5f5; border-radius: 6px; color: #666; font-size: 13px; line-height: 1.6;">
-                {{ currentAdapter.description }}
+                        <div v-if="testResult" style="margin-top: 16px;">
+                            <div style="font-weight: 600; margin-bottom: 8px;">测试结果</div>
+                            <a-alert :type="testResult.success ? 'success' : 'error'"
+                                :message="testResult.success ? '执行成功' : (testResult.result?.error || '执行失败')"
+                                show-icon />
+                            <pre style="margin-top: 12px; background: #fafafa; padding: 12px; border-radius: 6px; overflow: auto; white-space: pre-wrap; word-break: break-all;">{{ JSON.stringify(testResult.result, null, 2) }}</pre>
+                        </div>
+                    </template>
+                </a-card>
+            </a-col>
+        </a-row>
+
+        <a-modal v-model:open="createVisible" title="新建适配器脚本" ok-text="创建" cancel-text="取消" @ok="handleCreate">
+            <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
+                适配器 ID 将作为文件名与 manifest.id，建议只使用字母、数字、点、下划线和中划线。
             </div>
-
-            <!-- 模型管理折叠面板 -->
-            <a-collapse v-if="currentAdapter.models && currentAdapter.models.length > 0" style="margin-bottom: 16px;">
-                <a-collapse-panel key="models" header="模型管理">
-                    <!-- 模式选择 -->
-                    <div style="margin-bottom: 12px;">
-                        <span style="margin-right: 12px; color: #666;">过滤模式:</span>
-                        <a-radio-group :value="modelFilter.mode" @change="e => onModeChange(e.target.value)">
-                            <a-radio value="blacklist">黑名单</a-radio>
-                            <a-radio value="whitelist">白名单</a-radio>
-                        </a-radio-group>
-                    </div>
-                    <div style="font-size: 12px; color: #999; margin-bottom: 12px;">
-                        {{ modelFilter.mode === 'blacklist' ? '关闭的模型将被禁用，其他模型可用' : '仅开启的模型可用，其他模型禁用' }}
-                    </div>
-
-                    <!-- 模型列表 -->
-                    <div style="max-height: 300px; overflow-y: auto;">
-                        <div v-for="modelId in currentAdapter.models" :key="modelId"
-                            style="display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f0f0f0;">
-                            <span style="font-size: 13px; color: #333;">{{ modelId }}</span>
-                            <a-switch :checked="isModelEnabled(modelId)"
-                                @change="checked => toggleModel(modelId, checked)" size="small" />
-                        </div>
-                    </div>
-                </a-collapse-panel>
-            </a-collapse>
-
-            <!-- 其他配置项 -->
-            <div v-if="!currentAdapter.configSchema || currentAdapter.configSchema.length === 0">
-                <a-empty v-if="!currentAdapter.models || currentAdapter.models.length === 0" description="该适配器没有可配置项" />
-            </div>
-
-            <a-form layout="vertical" v-if="currentAdapter.configSchema && currentAdapter.configSchema.length > 0">
-                <template v-for="field in currentAdapter.configSchema" :key="field.key">
-                    <a-form-item :label="field.label" :required="field.required">
-                        <!-- 字符串输入 -->
-                        <a-input v-if="field.type === 'string'" v-model:value="currentConfig[field.key]"
-                            :placeholder="field.placeholder" />
-
-                        <!-- 数字输入 -->
-                        <a-input-number v-if="field.type === 'number'" v-model:value="currentConfig[field.key]"
-                            :min="field.min" :max="field.max" style="width: 100%;" />
-
-                        <!-- 布尔开关 -->
-                        <div v-if="field.type === 'boolean'">
-                            <a-switch v-model:checked="currentConfig[field.key]" />
-                        </div>
-
-                        <!-- 下拉选择 -->
-                        <a-select v-if="field.type === 'select'" v-model:value="currentConfig[field.key]"
-                            :options="field.options" />
-
-                        <div v-if="field.note" style="font-size: 12px; color: #8c8c8c; margin-top: 4px;">
-                            {{ field.note }}
-                        </div>
-                    </a-form-item>
-                </template>
-            </a-form>
-
-            <template #footer>
-                <div style="text-align: right;">
-                    <a-button style="margin-right: 8px" @click="drawerVisible = false">取消</a-button>
-                    <a-button type="primary" @click="handleSave">保存配置</a-button>
-                </div>
-            </template>
-        </a-drawer>
+            <a-input v-model:value="newAdapterId" placeholder="例如: chatgpt" />
+        </a-modal>
     </a-layout>
 </template>

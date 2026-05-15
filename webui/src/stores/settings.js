@@ -232,6 +232,61 @@ export const useSettingsStore = defineStore('settings', {
                 Modal.error({ title: '保存失败 (网络异常)', content: e.message });
             }
             return false;
+        },
+
+        async fetchAdapterSource(adapterId) {
+            const res = await fetch(`/admin/adapters/${encodeURIComponent(adapterId)}/source`, {
+                headers: this.getHeaders()
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.error?.message || data.message || `读取脚本失败: ${res.status}`);
+            }
+            return data.source;
+        },
+
+        async saveAdapterSource(adapterId, source) {
+            const res = await fetch(`/admin/adapters/${encodeURIComponent(adapterId)}/source`, {
+                method: 'PUT',
+                headers: this.getHeaders(),
+                body: JSON.stringify({ source })
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.error?.message || data.message || `保存脚本失败: ${res.status}`);
+            }
+            if (data.success) {
+                message.success(data.message || '脚本已保存');
+            } else {
+                Modal.warning({ title: '脚本已保存但无效', content: data.message || '请检查脚本错误' });
+            }
+            return data;
+        },
+
+        async deleteAdapterSource(adapterId) {
+            const res = await fetch(`/admin/adapters/${encodeURIComponent(adapterId)}`, {
+                method: 'DELETE',
+                headers: this.getHeaders()
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.error?.message || data.message || `删除脚本失败: ${res.status}`);
+            }
+            message.success(data.message || '脚本已删除');
+            return true;
+        },
+
+        async testAdapter(adapterId, payload) {
+            const res = await fetch(`/admin/adapters/${encodeURIComponent(adapterId)}/test`, {
+                method: 'POST',
+                headers: this.getHeaders(),
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.error?.message || data.message || `测试失败: ${res.status}`);
+            }
+            return data;
         }
     }
 });

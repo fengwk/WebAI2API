@@ -8,14 +8,10 @@
  */
 
 import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { logger } from '../utils/logger.js';
+import { ensureAdaptersDirSync, listAdapterFiles, importAdapterModule, ADAPTERS_DIR } from './adapterStore.js';
 
-// 获取当前目录
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const ADAPTER_DIR = path.join(__dirname, 'adapter');
+ensureAdaptersDirSync();
 
 /**
  * 图片输入策略枚举
@@ -76,33 +72,37 @@ class AdapterRegistry {
     async loadAll() {
         if (this.loaded) return;
 
-        //logger.info('注册表', `正在扫描适配器目录: ${ADAPTER_DIR}`);
-        logger.info('注册表', `正在扫描适配器目录...`);
+        logger.info('注册表', `正在扫描适配器目录: ${ADAPTERS_DIR}`);
 
-        const files = fs.readdirSync(ADAPTER_DIR).filter(f => f.endsWith('.js'));
+        this.adapters.clear();
+        const files = await listAdapterFiles();
 
         for (const file of files) {
-            const filePath = path.join(ADAPTER_DIR, file);
             try {
-                const module = await import(`file://${filePath}`);
+                const module = await importAdapterModule(file.filePath);
 
                 if (!module.manifest) {
-                    logger.warn('注册表', `跳过 ${file}: 未导出 manifest`);
+                    logger.warn('注册表', `跳过 ${file.fileName}: 未导出 manifest`);
                     continue;
                 }
 
                 const manifest = module.manifest;
 
+                if (manifest.id !== file.id) {
+                    logger.error('注册表', `${file.fileName} manifest 校验失败: manifest.id 必须与文件名一致 (${file.id})`);
+                    continue;
+                }
+
                 // 校验必需字段
-                if (!this.validateManifest(manifest, file)) {
+                if (!this.validateManifest(manifest, file.fileName)) {
                     continue;
                 }
 
                 this.adapters.set(manifest.id, manifest);
-                logger.debug('注册表', `已加载适配器: ${manifest.id} (${manifest.displayName || file})`);
+                logger.debug('注册表', `已加载适配器: ${manifest.id} (${manifest.displayName || file.fileName})`);
 
             } catch (err) {
-                logger.error('注册表', `加载 ${file} 失败: ${err.message}`);
+                logger.error('注册表', `加载 ${file.fileName} 失败: ${err.message}`);
             }
         }
 
@@ -110,13 +110,13 @@ class AdapterRegistry {
         logger.info('注册表', `适配器加载完成，共 ${this.adapters.size} 个可用`);
     }
 
-    /**
-     * 校验 manifest 必需字段
-     * @param {object} manifest
-     * @param {string} fileName
-     * @returns {boolean}
-     */
-    validateManifest(manifest, fileName) {
+    async reload() {
+        this.loaded = false;
+        this.adapters.clear();
+        await this.loadAll();
+    }
+
+    getManifestErrors(manifest, fileName) {
         const errors = [];
 
         if (!manifest.id || typeof manifest.id !== 'string') {
@@ -140,6 +140,18 @@ class AdapterRegistry {
                 }
             }
         }
+
+        return errors;
+    }
+
+    /**
+     * 校验 manifest 必需字段
+     * @param {object} manifest
+     * @param {string} fileName
+     * @returns {boolean}
+     */
+    validateManifest(manifest, fileName) {
+        const errors = this.getManifestErrors(manifest, fileName);
 
         if (errors.length > 0) {
             logger.error('注册表', `${fileName} manifest 校验失败: ${errors.join('; ')}`);

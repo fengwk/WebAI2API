@@ -9,6 +9,108 @@ import { initBrowserBase, createCursor } from '../engine/launcher.js';
 import { registry } from '../registry.js';
 import { tryGotoWithCheck } from '../utils/page.js';
 
+function createAdapterApi(workerName, instanceName, meta = {}) {
+    return {
+        log(level, message, extra = {}) {
+            const normalizedLevel = String(level || 'info').toLowerCase();
+            const method = ['debug', 'warn', 'error'].includes(normalizedLevel) ? normalizedLevel : 'info';
+            logger[method]('动态适配器', `[${workerName}${instanceName ? `@${instanceName}` : ''}] ${message}`, {
+                ...meta,
+                ...extra
+            });
+        }
+    };
+}
+
+function createDebugApi(workerName, instanceName, page, meta, logs, captures) {
+    const baseApi = createAdapterApi(workerName, instanceName, meta);
+
+    return {
+        ...baseApi,
+        log(level, message, extra = {}) {
+            const entry = {
+                ts: Date.now(),
+                level: String(level || 'info').toLowerCase(),
+                message,
+                extra
+            };
+            logs.push(entry);
+            baseApi.log(level, message, extra);
+        },
+        async sleep(ms) {
+            await new Promise(resolve => setTimeout(resolve, ms));
+        },
+        async capture(name, options = {}) {
+            const capture = {
+                name: name || `capture-${captures.length + 1}`,
+                ts: Date.now(),
+                url: page.url()
+            };
+
+            try {
+                capture.title = await page.title();
+            } catch {
+                capture.title = '';
+            }
+
+            if (options.html) {
+                try {
+                    capture.html = await page.content();
+                } catch (e) {
+                    capture.htmlError = e.message;
+                }
+            }
+
+            if (options.text) {
+                try {
+                    capture.text = await page.locator('body').innerText({ timeout: 5000 });
+                } catch (e) {
+                    capture.textError = e.message;
+                }
+            }
+
+            if (options.screenshot !== false) {
+                try {
+                    const buffer = await page.screenshot({
+                        fullPage: !!options.fullPage,
+                        type: 'png'
+                    });
+                    capture.screenshot = `data:image/png;base64,${buffer.toString('base64')}`;
+                } catch (e) {
+                    capture.screenshotError = e.message;
+                }
+            }
+
+            captures.push(capture);
+            logs.push({
+                ts: Date.now(),
+                level: 'debug',
+                message: `capture:${capture.name}`,
+                extra: {
+                    url: capture.url,
+                    hasHtml: !!capture.html,
+                    hasText: !!capture.text,
+                    hasScreenshot: !!capture.screenshot
+                }
+            });
+            return capture;
+        }
+    };
+}
+
+function compileDebugRunner(script) {
+    const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor;
+    return new AsyncFunction(
+        'ctx',
+        'api',
+        'prompt',
+        'imagePaths',
+        'modelId',
+        'meta',
+        `const { page, context, config, proxyConfig, userDataDir, workerName, instanceName } = ctx;\n${script}`
+    );
+}
+
 /**
  * Worker 类 - 封装单个浏览器实例
  */
@@ -482,9 +584,13 @@ export class Worker {
         const subContext = {
             ...ctx,
             page: this.page,
+            context: this.browser,
             config: this.globalConfig,
             proxyConfig: this.proxyConfig,
-            userDataDir: this.userDataDir
+            userDataDir: this.userDataDir,
+            workerName: this.name,
+            instanceName: this.instanceName,
+            api: createAdapterApi(this.name, this.instanceName, meta)
         };
 
         // 扩展 meta，添加 adapter 和 model 信息
@@ -496,6 +602,59 @@ export class Worker {
             return await adapter.generate(subContext, prompt, paths, modelId, enrichedMeta);
         } finally {
             this.busyCount--;
+        }
+    }
+
+    async runAdapterTest(adapterId, prompt, paths, modelId, meta = {}) {
+        if (!this.initialized || !this.browser) {
+            await this._reinit();
+        }
+
+        const adapter = registry.getAdapter(adapterId);
+        if (!adapter) {
+            return { error: `适配器不存在: ${adapterId}` };
+        }
+
+        const page = await this.browser.newPage();
+        page.authState = { isHandlingAuth: false };
+        const humanizeCursorMode = this.globalConfig?.browser?.humanizeCursor;
+        page._humanizeCursorMode = humanizeCursorMode;
+        if (humanizeCursorMode === true) {
+            page.cursor = createCursor(page);
+        }
+
+        if (this._navigationHandler) {
+            page.on('framenavigated', async () => {
+                try { await this._navigationHandler(page); } catch { }
+            });
+        }
+
+        const subContext = {
+            page,
+            context: this.browser,
+            config: this.globalConfig,
+            proxyConfig: this.proxyConfig,
+            userDataDir: this.userDataDir,
+            workerName: this.name,
+            instanceName: this.instanceName,
+            api: createAdapterApi(this.name, this.instanceName, meta)
+        };
+
+        this.busyCount++;
+        try {
+            return await adapter.generate(subContext, prompt, paths, modelId, {
+                ...meta,
+                adapter: adapterId,
+                model: modelId,
+                test: true
+            });
+        } finally {
+            this.busyCount--;
+            try {
+                if (!page.isClosed()) {
+                    await page.close();
+                }
+            } catch { }
         }
     }
 
@@ -566,6 +725,91 @@ export class Worker {
             }
 
             return allModels;
+        }
+    }
+
+    async runDebugScript(script, prompt, paths, modelId, meta = {}, options = {}) {
+        if (!this.initialized || !this.browser) {
+            await this._reinit();
+        }
+
+        const page = await this.browser.newPage();
+        page.authState = { isHandlingAuth: false };
+        const humanizeCursorMode = this.globalConfig?.browser?.humanizeCursor;
+        page._humanizeCursorMode = humanizeCursorMode;
+        if (humanizeCursorMode === true) {
+            page.cursor = createCursor(page);
+        }
+
+        if (this._navigationHandler) {
+            page.on('framenavigated', async () => {
+                try { await this._navigationHandler(page); } catch { }
+            });
+        }
+
+        if (options.timeout && Number(options.timeout) > 0) {
+            const timeout = Number(options.timeout);
+            page.setDefaultTimeout(timeout);
+            page.setDefaultNavigationTimeout(timeout);
+        }
+
+        const logs = [];
+        const captures = [];
+        const api = createDebugApi(this.name, this.instanceName, page, meta, logs, captures);
+        const ctx = {
+            page,
+            context: this.browser,
+            config: this.globalConfig,
+            proxyConfig: this.proxyConfig,
+            userDataDir: this.userDataDir,
+            workerName: this.name,
+            instanceName: this.instanceName,
+            api
+        };
+
+        this.busyCount++;
+        try {
+            const runner = compileDebugRunner(script);
+            const result = await runner(ctx, api, prompt, paths, modelId, meta);
+            return {
+                success: true,
+                result,
+                logs,
+                captures,
+                page: {
+                    url: page.url(),
+                    title: await page.title().catch(() => '')
+                },
+                keepPageOpen: !!options.keepPageOpen
+            };
+        } catch (err) {
+            try {
+                await api.capture('error-final', { screenshot: true, html: true, text: true, fullPage: true });
+            } catch { }
+            return {
+                success: false,
+                result: {
+                    error: err.message,
+                    stack: err.stack,
+                    url: page.url()
+                },
+                logs,
+                captures,
+                page: {
+                    url: page.url(),
+                    title: await page.title().catch(() => '')
+                },
+                keepPageOpen: !!options.keepPageOpen
+            };
+        } finally {
+            this.busyCount--;
+            if (!options.keepPageOpen) {
+                try {
+                    if (!page.isClosed()) {
+                        await page.close();
+                    }
+                } catch { }
+            }
         }
     }
 

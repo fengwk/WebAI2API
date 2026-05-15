@@ -319,4 +319,39 @@ export class PoolManager {
     getFirstPage() {
         return this.workers[0]?.page || null;
     }
+
+    getWorkerByName(workerName) {
+        if (!workerName) {
+            return this.workers[0] || null;
+        }
+        return this.workers.find(worker => worker.name === workerName) || null;
+    }
+
+    async testAdapter(workerName, adapterId, prompt, paths, modelId, meta = {}) {
+        const worker = this.getWorkerByName(workerName);
+        if (!worker) {
+            throw new Error(`Worker 不存在: ${workerName}`);
+        }
+
+        const adapter = registry.getAdapter(adapterId);
+        if (!adapter) {
+            throw new Error(`适配器不存在: ${adapterId}`);
+        }
+
+        const resolvedModelId = modelId || adapter.models?.[0]?.id || null;
+        if (!resolvedModelId) {
+            throw new Error(`适配器 ${adapterId} 没有可用模型`);
+        }
+
+        return await worker.runAdapterTest(adapterId, prompt, paths, resolvedModelId, meta);
+    }
+
+    async runDebugScript(workerName, script, prompt, paths, modelId, meta = {}, options = {}) {
+        const worker = this.getWorkerByName(workerName);
+        if (!worker) {
+            throw new Error(`Worker 不存在: ${workerName}`);
+        }
+
+        return await worker.runDebugScript(script, prompt, paths, modelId, meta, options);
+    }
 }

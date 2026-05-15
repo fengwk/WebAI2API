@@ -49,6 +49,116 @@ import {
 import path from 'path';
 import fs from 'fs/promises';
 import { useContextDownload } from '../../../backend/utils/download.js';
+import {
+    listAdapterFiles,
+    readAdapterSource,
+    writeAdapterSource,
+    deleteAdapterSource,
+    importAdapterModule,
+    normalizeAdapterId,
+    adapterSourceExists
+} from '../../../backend/adapterStore.js';
+
+function buildRequestId() {
+    return `adapter-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function inspectAdapterFile(file) {
+    try {
+        const module = await importAdapterModule(file.filePath);
+        if (!module.manifest) {
+            return {
+                id: file.id,
+                fileId: file.id,
+                valid: false,
+                error: '未导出 manifest',
+                displayName: file.id,
+                description: '',
+                models: []
+            };
+        }
+
+        const manifest = module.manifest;
+        if (manifest.id !== file.id) {
+            return {
+                id: file.id,
+                fileId: file.id,
+                valid: false,
+                error: `manifest.id 必须与文件名一致 (${file.id})`,
+                displayName: manifest.displayName || file.id,
+                description: manifest.description || '',
+                models: (manifest.models || []).map(m => m.id)
+            };
+        }
+
+        const errors = registry.getManifestErrors(manifest, file.fileName);
+        if (errors.length > 0) {
+            return {
+                id: file.id,
+                fileId: file.id,
+                valid: false,
+                error: errors.join('; '),
+                displayName: manifest.displayName || file.id,
+                description: manifest.description || '',
+                models: (manifest.models || []).map(m => m.id)
+            };
+        }
+
+        return {
+            id: manifest.id,
+            fileId: file.id,
+            valid: true,
+            error: null,
+            displayName: manifest.displayName || manifest.id,
+            description: manifest.description || '',
+            models: (manifest.models || []).map(m => m.id),
+            modelCount: manifest.models?.length || 0,
+            configSchema: manifest.configSchema || []
+        };
+    } catch (err) {
+        return {
+            id: file.id,
+            fileId: file.id,
+            valid: false,
+            error: err.message,
+            displayName: file.id,
+            description: '',
+            models: []
+        };
+    }
+}
+
+async function listDynamicAdapters() {
+    const files = await listAdapterFiles();
+    const results = [];
+    for (const file of files) {
+        results.push(await inspectAdapterFile(file));
+    }
+    return results;
+}
+
+async function saveTestImages(images, tempDir) {
+    if (!Array.isArray(images) || images.length === 0) {
+        return [];
+    }
+
+    const createdPaths = [];
+    for (let i = 0; i < images.length; i++) {
+        const dataUri = images[i];
+        if (typeof dataUri !== 'string' || !dataUri.startsWith('data:image/')) {
+            continue;
+        }
+        const mimeMatch = dataUri.match(/^data:(image\/[^;]+);base64,(.+)$/);
+        if (!mimeMatch) continue;
+        const mimeType = mimeMatch[1];
+        const base64 = mimeMatch[2];
+        const ext = mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+        const filePath = path.join(tempDir, `adapter-test-${Date.now()}-${i}.${ext}`);
+        await fs.writeFile(filePath, Buffer.from(base64, 'base64'));
+        createdPaths.push(filePath);
+    }
+    return createdPaths;
+}
 
 /**
  * 读取请求体
@@ -381,29 +491,135 @@ export function createAdminRouter(context) {
 
             // ==================== 元数据 ====================
 
-            // GET /admin/adapters - 获取适配器列表（含 configSchema）
+            // GET /admin/adapters - 获取动态适配器列表
             if (method === 'GET' && pathname === '/adapters') {
-                const adapters = [];
-                const adapterIds = registry.getAdapterIds();
-                const adapterConfig = getAdaptersConfig();
+                sendJson(res, 200, await listDynamicAdapters());
+                return;
+            }
 
-                for (const id of adapterIds) {
-                    const adapter = registry.getAdapter(id);
-                    if (adapter) {
-                        const config = adapterConfig[id] || {};
-                        adapters.push({
-                            id: adapter.id,
-                            displayName: adapter.displayName || adapter.id,
-                            description: adapter.description || '',
-                            modelCount: adapter.models?.length || 0,
-                            models: (adapter.models || []).map(m => m.id),
-                            modelFilter: config.modelFilter || { mode: 'blacklist', list: [] },
-                            configSchema: adapter.configSchema || []
-                        });
-                    }
+            // GET /admin/adapters/:id/source - 获取脚本源码
+            const adapterSourceMatch = pathname.match(/^\/adapters\/([^/]+)\/source$/);
+            if (method === 'GET' && adapterSourceMatch) {
+                const adapterId = normalizeAdapterId(decodeURIComponent(adapterSourceMatch[1]));
+                if (!await adapterSourceExists(adapterId)) {
+                    sendApiError(res, { code: ERROR_CODES.NOT_FOUND, message: '适配器不存在', status: 404 });
+                    return;
+                }
+                const source = await readAdapterSource(adapterId);
+                sendJson(res, 200, { id: adapterId, source });
+                return;
+            }
+
+            // PUT /admin/adapters/:id/source - 保存脚本源码
+            if (method === 'PUT' && adapterSourceMatch) {
+                const adapterId = normalizeAdapterId(decodeURIComponent(adapterSourceMatch[1]));
+                const body = await readBody(req);
+                if (typeof body.source !== 'string') {
+                    sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: '缺少 source 字段' });
+                    return;
                 }
 
-                sendJson(res, 200, adapters);
+                await writeAdapterSource(adapterId, body.source);
+                await registry.reload();
+                const adapters = await listDynamicAdapters();
+                const adapter = adapters.find(item => item.id === adapterId);
+                const success = !!adapter?.valid;
+                sendJson(res, 200, {
+                    success,
+                    message: success ? '脚本已保存并生效' : `脚本已保存，但当前无效: ${adapter?.error || '未知错误'}`,
+                    adapter
+                });
+                return;
+            }
+
+            // DELETE /admin/adapters/:id - 删除动态适配器
+            const adapterDeleteMatch = pathname.match(/^\/adapters\/([^/]+)$/);
+            if (method === 'DELETE' && adapterDeleteMatch) {
+                const adapterId = normalizeAdapterId(decodeURIComponent(adapterDeleteMatch[1]));
+                if (!await adapterSourceExists(adapterId)) {
+                    sendApiError(res, { code: ERROR_CODES.NOT_FOUND, message: '适配器不存在', status: 404 });
+                    return;
+                }
+                await deleteAdapterSource(adapterId);
+                await registry.reload();
+                sendJson(res, 200, { success: true, message: '适配器已删除' });
+                return;
+            }
+
+            // POST /admin/adapters/:id/test - 测试执行动态适配器
+            const adapterTestMatch = pathname.match(/^\/adapters\/([^/]+)\/test$/);
+            if (method === 'POST' && adapterTestMatch) {
+                const adapterId = normalizeAdapterId(decodeURIComponent(adapterTestMatch[1]));
+                await registry.reload();
+                if (!registry.hasAdapter(adapterId)) {
+                    sendApiError(res, { code: ERROR_CODES.INVALID_MODEL, message: '适配器当前无效，无法执行测试' });
+                    return;
+                }
+
+                const body = await readBody(req);
+                const prompt = String(body.prompt || '');
+                const workerName = body.workerName || null;
+                const modelId = body.modelId || null;
+                const imagePaths = await saveTestImages(body.images, tempDir);
+
+                let poolContext = queueManager?.getPoolContext?.();
+                if (!poolContext) {
+                    poolContext = await queueManager.initializePool();
+                }
+
+                try {
+                    const result = await poolContext.poolManager.testAdapter(workerName, adapterId, prompt, imagePaths, modelId, {
+                        id: buildRequestId()
+                    });
+                    sendJson(res, 200, { success: !result.error, result });
+                } finally {
+                    for (const p of imagePaths) {
+                        try {
+                            await fs.unlink(p);
+                        } catch { }
+                    }
+                }
+                return;
+            }
+
+            // POST /admin/debug/run - 直接执行临时调试脚本
+            if (method === 'POST' && pathname === '/debug/run') {
+                const body = await readBody(req);
+                if (typeof body.script !== 'string' || !body.script.trim()) {
+                    sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: '缺少 script 字段' });
+                    return;
+                }
+
+                const prompt = String(body.prompt || '');
+                const workerName = body.workerName || null;
+                const modelId = body.modelId || null;
+                const keepPageOpen = !!body.keepPageOpen;
+                const timeout = body.timeout || null;
+                const imagePaths = await saveTestImages(body.images, tempDir);
+
+                let poolContext = queueManager?.getPoolContext?.();
+                if (!poolContext) {
+                    poolContext = await queueManager.initializePool();
+                }
+
+                try {
+                    const result = await poolContext.poolManager.runDebugScript(
+                        workerName,
+                        body.script,
+                        prompt,
+                        imagePaths,
+                        modelId,
+                        { id: buildRequestId(), debug: true },
+                        { keepPageOpen, timeout }
+                    );
+                    sendJson(res, 200, result);
+                } finally {
+                    for (const p of imagePaths) {
+                        try {
+                            await fs.unlink(p);
+                        } catch { }
+                    }
+                }
                 return;
             }
 

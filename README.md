@@ -19,6 +19,8 @@
 - [API 接口](#-api-接口)
 - [设备配置参考](#-设备配置参考)
 - [架构与扩展指南](ARCHITECTURE.md)
+- [动态适配器设计（KISS 版）](DYNAMIC_ADAPTERS_KISS.md)
+- [动态适配器脚本编写指南](ADAPTER_SCRIPT_GUIDE.md)
 
 ---
 

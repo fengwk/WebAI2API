@@ -25,7 +25,7 @@ onMounted(async () => {
 
 // 计算属性：适配器选项（包含 merge）
 const adapterOptions = computed(() => {
-    const options = settingsStore.adaptersMeta.map(a => ({
+    const options = settingsStore.adaptersMeta.filter(a => a.valid !== false).map(a => ({
         label: a.displayName || a.id,
         value: a.id
     }));
@@ -39,7 +39,7 @@ const adapterOptions = computed(() => {
 // 计算属性：可聚合的适配器选项（不包含 merge，避免套娃）
 const mergeableAdapterOptions = computed(() => {
     return settingsStore.adaptersMeta
-        .filter(a => a.id !== 'merge')
+        .filter(a => a.id !== 'merge' && a.valid !== false)
         .map(a => ({
             label: a.displayName || a.id,
             value: a.id
@@ -275,11 +275,11 @@ const handleSaveEdit = async () => {
 const editingWorkerIndex = ref(-1);
 const workerFormVisible = ref(false);
 const workerForm = ref({
-    name: '',
-    type: 'lmarena',
-    mergeTypes: [],
-    mergeMonitor: ''
-});
+        name: '',
+        type: adapterOptions.value.find(o => o.value !== 'merge')?.value || 'merge',
+        mergeTypes: [],
+        mergeMonitor: ''
+    });
 
 // 添加Worker
 const handleAddWorker = () => {
@@ -287,7 +287,7 @@ const handleAddWorker = () => {
     const randomSuffix = Math.random().toString(36).substring(2, 7);
     workerForm.value = {
         name: `worker-${editForm.value.workers.length + 1}-${randomSuffix}`,
-        type: 'lmarena',
+        type: adapterOptions.value.find(o => o.value !== 'merge')?.value || 'merge',
         mergeTypes: [],
         mergeMonitor: ''
     };
@@ -605,7 +605,7 @@ const handleRemoveWorker = (index) => {
             </div>
 
             <div style="margin-bottom: 16px;">
-                <div style="font-weight: 600; margin-bottom: 8px;">适配器类型</div>
+                <div style="font-weight: 600; margin-bottom: 8px;">适配器</div>
                 <a-select v-model:value="workerForm.type" style="width: 100%" :options="adapterOptions" />
             </div>
 

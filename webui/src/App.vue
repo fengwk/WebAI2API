@@ -1,6 +1,6 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
-import { useRouter } from 'vue-router';
+import { ref, onMounted, onUnmounted, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { Modal, message } from 'ant-design-vue';
 import {
   DashboardOutlined,
@@ -22,6 +22,7 @@ import { useSettingsStore } from '@/stores/settings';
 import LoginModal from '@/components/auth/LoginModal.vue';
 
 const router = useRouter();
+const route = useRoute();
 const settingsStore = useSettingsStore();
 
 const selectedKeys = ref(['dash']);
@@ -306,6 +307,22 @@ const menuRoutes = {
   'tools-logs': '/tools/logs'
 };
 
+const routeToMenuKey = {
+  '/': 'dash',
+  '/tools/request': 'history',
+  '/settings/server': 'settings-server',
+  '/settings/workers': 'settings-workers',
+  '/settings/browser': 'settings-browser',
+  '/settings/adapters': 'settings-adapters',
+  '/tools/display': 'tools-display',
+  '/tools/cache': 'tools-cache',
+  '/tools/logs': 'tools-logs'
+};
+
+watch(() => route.path, (path) => {
+  selectedKeys.value = [routeToMenuKey[path] || 'dash'];
+}, { immediate: true });
+
 // 处理菜单点击
 const handleMenuClick = ({ key }) => {
   const route = menuRoutes[key];
@@ -445,7 +462,7 @@ onMounted(async () => {
               <a-menu-item key="settings-server">服务器</a-menu-item>
               <a-menu-item key="settings-workers">工作池</a-menu-item>
               <a-menu-item key="settings-browser">浏览器</a-menu-item>
-              <a-menu-item key="settings-adapters">适配器</a-menu-item>
+              <a-menu-item key="settings-adapters">适配器脚本</a-menu-item>
             </a-sub-menu>
             <a-sub-menu key="tools">
               <template #title>
