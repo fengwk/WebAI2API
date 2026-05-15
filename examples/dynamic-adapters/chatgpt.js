@@ -88,7 +88,7 @@ function extractConversationText(conversationBody) {
 }
 
 export const manifest = {
-  id: 'chatgpt',
+  id: 'chatgpt_image',
   displayName: 'ChatGPT Image',
   description: 'ChatGPT 图片生成动态适配器，默认目标模型为 gpt-image-2。',
   models: [

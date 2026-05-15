@@ -4,6 +4,7 @@
  */
 
 import fs from 'fs';
+import path from 'path';
 import { logger } from '../../utils/logger.js';
 import { initBrowserBase, createCursor } from '../engine/launcher.js';
 import { registry } from '../registry.js';
@@ -22,7 +23,34 @@ function createAdapterApi(workerName, instanceName, meta = {}) {
     };
 }
 
-function createDebugApi(workerName, instanceName, page, meta, logs, captures) {
+function previewText(text, maxLen = 500) {
+    if (typeof text !== 'string') return '';
+    return text.length > maxLen ? `${text.slice(0, maxLen)}...` : text;
+}
+
+async function writeDebugArtifact(artifactDir, fileName, content, encoding = null) {
+    await fs.promises.mkdir(artifactDir, { recursive: true });
+    const filePath = path.join(artifactDir, fileName);
+    if (encoding) {
+        await fs.promises.writeFile(filePath, content, { encoding });
+    } else {
+        await fs.promises.writeFile(filePath, content);
+    }
+    return filePath;
+}
+
+async function persistDataUrlArtifact(artifactDir, artifactBasePath, fileBaseName, dataUrl) {
+    const match = /^data:([^;]+);base64,(.+)$/.exec(dataUrl || '');
+    if (!match) return null;
+    const mimeType = match[1];
+    const base64 = match[2];
+    const ext = mimeType.split('/')[1]?.replace('jpeg', 'jpg') || 'bin';
+    const fileName = `${fileBaseName}.${ext}`;
+    await writeDebugArtifact(artifactDir, fileName, Buffer.from(base64, 'base64'));
+    return `${artifactBasePath}/${encodeURIComponent(fileName)}`;
+}
+
+function createDebugApi(workerName, instanceName, page, meta, logs, captures, artifactDir, artifactBasePath) {
     const baseApi = createAdapterApi(workerName, instanceName, meta);
 
     return {
@@ -55,7 +83,11 @@ function createDebugApi(workerName, instanceName, page, meta, logs, captures) {
 
             if (options.html) {
                 try {
-                    capture.html = await page.content();
+                    const html = await page.content();
+                    const fileName = `${capture.name}.html`;
+                    await writeDebugArtifact(artifactDir, fileName, html, 'utf8');
+                    capture.htmlUrl = `${artifactBasePath}/${encodeURIComponent(fileName)}`;
+                    capture.htmlPreview = previewText(html, 300);
                 } catch (e) {
                     capture.htmlError = e.message;
                 }
@@ -63,7 +95,9 @@ function createDebugApi(workerName, instanceName, page, meta, logs, captures) {
 
             if (options.text) {
                 try {
-                    capture.text = await page.locator('body').innerText({ timeout: 5000 });
+                    const text = await page.locator('body').innerText({ timeout: 5000 });
+                    capture.text = text;
+                    capture.textPreview = previewText(text, 300);
                 } catch (e) {
                     capture.textError = e.message;
                 }
@@ -75,7 +109,9 @@ function createDebugApi(workerName, instanceName, page, meta, logs, captures) {
                         fullPage: !!options.fullPage,
                         type: 'png'
                     });
-                    capture.screenshot = `data:image/png;base64,${buffer.toString('base64')}`;
+                    const fileName = `${capture.name}.png`;
+                    await writeDebugArtifact(artifactDir, fileName, buffer);
+                    capture.screenshotUrl = `${artifactBasePath}/${encodeURIComponent(fileName)}`;
                 } catch (e) {
                     capture.screenshotError = e.message;
                 }
@@ -88,9 +124,9 @@ function createDebugApi(workerName, instanceName, page, meta, logs, captures) {
                 message: `capture:${capture.name}`,
                 extra: {
                     url: capture.url,
-                    hasHtml: !!capture.html,
+                    hasHtml: !!capture.htmlUrl,
                     hasText: !!capture.text,
-                    hasScreenshot: !!capture.screenshot
+                    hasScreenshot: !!capture.screenshotUrl
                 }
             });
             return capture;
@@ -755,7 +791,9 @@ export class Worker {
 
         const logs = [];
         const captures = [];
-        const api = createDebugApi(this.name, this.instanceName, page, meta, logs, captures);
+        const artifactDir = options.artifactDir;
+        const artifactBasePath = options.artifactBasePath;
+        const api = createDebugApi(this.name, this.instanceName, page, meta, logs, captures, artifactDir, artifactBasePath);
         const ctx = {
             page,
             context: this.browser,
@@ -771,6 +809,13 @@ export class Worker {
         try {
             const runner = compileDebugRunner(script);
             const result = await runner(ctx, api, prompt, paths, modelId, meta);
+            if (result?.image && typeof result.image === 'string' && result.image.startsWith('data:')) {
+                const imageUrl = await persistDataUrlArtifact(artifactDir, artifactBasePath, 'result-image', result.image);
+                if (imageUrl) {
+                    result.imageUrl = result.imageUrl || imageUrl;
+                    delete result.image;
+                }
+            }
             return {
                 success: true,
                 result,

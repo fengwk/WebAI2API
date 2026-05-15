@@ -148,7 +148,7 @@ function extractAiTextFromResponse(buf) {
 }
 
 export const manifest = {
-  id: 'gemini',
+  id: 'gemini_image',
   displayName: 'Gemini Image',
   description: 'Gemini 图片生成动态适配器，默认目标模型为 gemini-3-pro-image-preview。',
   models: [

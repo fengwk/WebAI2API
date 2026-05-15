@@ -502,6 +502,22 @@ POST /admin/debug/run
 
 - `logs` 来自 `api.log()`
 - `captures` 来自 `api.capture()`
+- 如果脚本返回了 `result.image = data:image/...;base64,...`，调试接口会自动把图片落盘为调试产物，并返回 `result.imageUrl`
+
+### 调试产物存放位置
+
+调试产物不会长期存放在运行数据目录，而是写入服务的临时目录下：
+
+```text
+<tempDir>/debug-artifacts/<runId>/
+```
+
+当前策略：
+
+- 图片截图 / 结果图片：保存为文件并返回 URL
+- HTML 快照：保存为文件并返回 URL
+- 文本快照：直接内联返回在 JSON 中
+- 调试产物会在后续调试请求时按 TTL 做轻量清理（当前默认约 30 分钟）
 
 ### 临时调试脚本上下文
 
@@ -538,6 +554,18 @@ await api.capture('step-name', {
   fullPage: true
 })
 ```
+
+执行后不会把截图 / HTML / 文本直接内联到超大 JSON 中，而是保存为调试产物文件，并返回：
+
+- `screenshotUrl`
+- `htmlUrl`
+
+其中：
+
+- 图片、HTML 等文件型产物返回 URL
+- 文本内容直接内联返回在 `capture.text`
+
+你可以直接用这些 URL 查看对应产物，避免 base64 截图和 HTML 快照把调试响应撑得过大。
 
 这是远程调试页面结构、截图、卡点位置最重要的手段。
 

@@ -63,6 +63,42 @@ function buildRequestId() {
     return `adapter-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function getArtifactContentType(fileName) {
+    if (fileName.endsWith('.png')) return 'image/png';
+    if (fileName.endsWith('.jpg') || fileName.endsWith('.jpeg')) return 'image/jpeg';
+    if (fileName.endsWith('.gif')) return 'image/gif';
+    if (fileName.endsWith('.webp')) return 'image/webp';
+    if (fileName.endsWith('.html')) return 'text/html; charset=utf-8';
+    if (fileName.endsWith('.txt')) return 'text/plain; charset=utf-8';
+    return 'application/octet-stream';
+}
+
+function getDebugArtifactsRoot(tempDir) {
+    return path.join(tempDir, 'debug-artifacts');
+}
+
+async function ensureDebugArtifactsDir(tempDir) {
+    await fs.mkdir(getDebugArtifactsRoot(tempDir), { recursive: true });
+}
+
+async function cleanupDebugArtifacts(tempDir, ttlMs = 30 * 60 * 1000) {
+    const root = getDebugArtifactsRoot(tempDir);
+    try {
+        const entries = await fs.readdir(root, { withFileTypes: true });
+        const now = Date.now();
+        for (const entry of entries) {
+            if (!entry.isDirectory()) continue;
+            const fullPath = path.join(root, entry.name);
+            try {
+                const stat = await fs.stat(fullPath);
+                if (now - stat.mtimeMs > ttlMs) {
+                    await fs.rm(fullPath, { recursive: true, force: true });
+                }
+            } catch { }
+        }
+    } catch { }
+}
+
 async function inspectAdapterFile(file) {
     try {
         const module = await importAdapterModule(file.filePath);
@@ -418,6 +454,9 @@ export function createAdminRouter(context) {
                 } else if (method === 'POST') {
                     const body = await readBody(req);
 
+                    // Worker 配置保存时，先重新加载当前动态适配器，确保 validator 能识别最新脚本
+                    await registry.reload();
+
                     // 校验配置（包括 Instance/Worker 名称唯一性）
                     const validation = validateInstancesConfig(body);
                     if (!validation.valid) {
@@ -602,6 +641,12 @@ export function createAdminRouter(context) {
                     poolContext = await queueManager.initializePool();
                 }
 
+                const runId = buildRequestId();
+                await ensureDebugArtifactsDir(tempDir);
+                await cleanupDebugArtifacts(tempDir);
+                const artifactDir = path.join(getDebugArtifactsRoot(tempDir), runId);
+                const artifactBasePath = `/admin/debug/artifacts/${encodeURIComponent(runId)}`;
+
                 try {
                     const result = await poolContext.poolManager.runDebugScript(
                         workerName,
@@ -609,9 +654,10 @@ export function createAdminRouter(context) {
                         prompt,
                         imagePaths,
                         modelId,
-                        { id: buildRequestId(), debug: true },
-                        { keepPageOpen, timeout }
+                        { id: runId, debug: true },
+                        { keepPageOpen, timeout, artifactDir, artifactBasePath }
                     );
+                    result.runId = runId;
                     sendJson(res, 200, result);
                 } finally {
                     for (const p of imagePaths) {
@@ -619,6 +665,24 @@ export function createAdminRouter(context) {
                             await fs.unlink(p);
                         } catch { }
                     }
+                }
+                return;
+            }
+
+            const debugArtifactMatch = pathname.match(/^\/debug\/artifacts\/([^/]+)\/([^/]+)$/);
+            if (method === 'GET' && debugArtifactMatch) {
+                const runId = decodeURIComponent(debugArtifactMatch[1]);
+                const fileName = decodeURIComponent(debugArtifactMatch[2]);
+                const filePath = path.join(getDebugArtifactsRoot(tempDir), runId, fileName);
+                try {
+                    const content = await fs.readFile(filePath);
+                    res.writeHead(200, {
+                        'Content-Type': getArtifactContentType(fileName),
+                        'Cache-Control': 'no-cache'
+                    });
+                    res.end(content);
+                } catch {
+                    sendApiError(res, { code: ERROR_CODES.NOT_FOUND, message: '调试产物不存在', status: 404 });
                 }
                 return;
             }

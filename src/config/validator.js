@@ -4,6 +4,7 @@
  */
 
 import { registry } from '../backend/registry.js';
+import { logger } from '../utils/logger.js';
 
 /**
  * 校验 Server 配置
@@ -203,7 +204,7 @@ export function validateInstancesConfig(data) {
                 if (!w.type || typeof w.type !== 'string') {
                     errors.push(`${wPrefix}: type 是必填字段`);
                 } else if (!validAdapterTypes.has(w.type)) {
-                    errors.push(`${wPrefix}: type "${w.type}" 不是有效的适配器类型`);
+                    logger.warn('配置器', `${wPrefix}: type "${w.type}" 当前无对应适配器，保存不阻断，启动时该 Worker 可能会被跳过`);
                 }
 
                 // merge 类型特殊校验
