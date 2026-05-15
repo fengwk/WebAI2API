@@ -6,6 +6,34 @@
 import net from 'net';
 import { getVncInfo } from '../../../utils/ipc.js';
 
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const WS_CLOSE_NORMAL = 1000;
+const WS_CLOSE_PROTOCOL_ERROR = 1002;
+const WS_CLOSE_INTERNAL_ERROR = 1011;
+
+function negotiateSubprotocol(req) {
+    const requested = String(req.headers['sec-websocket-protocol'] || '')
+        .split(',')
+        .map(item => item.trim())
+        .filter(Boolean);
+
+    if (requested.includes('binary')) {
+        return 'binary';
+    }
+
+    return null;
+}
+
+function writeCloseFrame(socket, code = WS_CLOSE_NORMAL, reason = '') {
+    if (socket.destroyed || socket.writableEnded) return;
+
+    const reasonBuffer = Buffer.from(String(reason || ''), 'utf8');
+    const payload = Buffer.alloc(2 + reasonBuffer.length);
+    payload.writeUInt16BE(code, 0);
+    reasonBuffer.copy(payload, 2);
+    socket.write(encodeWebSocketFrame(payload, 0x08));
+}
+
 /**
  * 处理 VNC WebSocket 升级请求
  * @param {import('http').IncomingMessage} req - HTTP 请求
@@ -17,9 +45,18 @@ export async function handleVncUpgrade(req, socket, head, authToken) {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
     // 验证 token
-    const token = url.searchParams.get('token');
-    if (token !== authToken) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    if (authToken) {
+        const token = url.searchParams.get('token');
+        if (token !== authToken) {
+            socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+            socket.destroy();
+            return;
+        }
+    }
+
+    const protocol = negotiateSubprotocol(req);
+    if (req.headers['sec-websocket-protocol'] && !protocol) {
+        socket.write('HTTP/1.1 426 Upgrade Required\r\n\r\n');
         socket.destroy();
         return;
     }
@@ -42,27 +79,31 @@ export async function handleVncUpgrade(req, socket, head, authToken) {
 
     const crypto = await import('crypto');
     const acceptKey = crypto.createHash('sha1')
-        .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+        .update(key + WS_GUID)
         .digest('base64');
 
     // 发送 WebSocket 握手响应
-    socket.write(
-        'HTTP/1.1 101 Switching Protocols\r\n' +
-        'Upgrade: websocket\r\n' +
-        'Connection: Upgrade\r\n' +
-        `Sec-WebSocket-Accept: ${acceptKey}\r\n` +
-        'Sec-WebSocket-Protocol: binary\r\n' +
-        '\r\n'
-    );
+    const headers = [
+        'HTTP/1.1 101 Switching Protocols',
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        `Sec-WebSocket-Accept: ${acceptKey}`
+    ];
+    if (protocol) {
+        headers.push(`Sec-WebSocket-Protocol: ${protocol}`);
+    }
+    socket.write(`${headers.join('\r\n')}\r\n\r\n`);
 
     // 连接到 VNC 服务器
     const vncSocket = net.createConnection({
         host: '127.0.0.1',
         port: vncInfo.port
     });
+    let websocketClosed = false;
 
     vncSocket.on('error', (err) => {
         console.error('[VNC Proxy] VNC 连接错误:', err.message);
+        writeCloseFrame(socket, WS_CLOSE_INTERNAL_ERROR, 'VNC backend error');
         socket.destroy();
     });
 
@@ -94,26 +135,41 @@ export async function handleVncUpgrade(req, socket, head, authToken) {
             if (!result) break;
 
             const { data, bytesConsumed, opcode } = result;
+            buffer = buffer.slice(bytesConsumed);
 
             // 关闭帧
             if (opcode === 0x08) {
+                websocketClosed = true;
+                writeCloseFrame(socket, WS_CLOSE_NORMAL);
                 vncSocket.destroy();
-                socket.destroy();
+                socket.end();
                 return;
+            }
+
+            if (opcode === 0x09) {
+                socket.write(encodeWebSocketFrame(data, 0x0A));
+                continue;
+            }
+
+            if (opcode === 0x0A) {
+                continue;
             }
 
             // 二进制数据或文本
             if (data && data.length > 0) {
                 vncSocket.write(data);
             }
-
-            buffer = buffer.slice(bytesConsumed);
         }
     });
 
     socket.on('close', () => vncSocket.destroy());
     socket.on('error', () => vncSocket.destroy());
-    vncSocket.on('close', () => socket.destroy());
+    vncSocket.on('close', () => {
+        if (!websocketClosed) {
+            writeCloseFrame(socket, WS_CLOSE_NORMAL);
+        }
+        socket.end();
+    });
 }
 
 /**
@@ -121,22 +177,22 @@ export async function handleVncUpgrade(req, socket, head, authToken) {
  * @param {Buffer} data - 要发送的数据
  * @returns {Buffer} WebSocket 帧
  */
-function encodeWebSocketFrame(data) {
+function encodeWebSocketFrame(data, opcode = 0x02) {
     const length = data.length;
     let header;
 
     if (length <= 125) {
         header = Buffer.alloc(2);
-        header[0] = 0x82; // FIN + Binary
+        header[0] = 0x80 | (opcode & 0x0F);
         header[1] = length;
     } else if (length <= 65535) {
         header = Buffer.alloc(4);
-        header[0] = 0x82;
+        header[0] = 0x80 | (opcode & 0x0F);
         header[1] = 126;
         header.writeUInt16BE(length, 2);
     } else {
         header = Buffer.alloc(10);
-        header[0] = 0x82;
+        header[0] = 0x80 | (opcode & 0x0F);
         header[1] = 127;
         header.writeBigUInt64BE(BigInt(length), 2);
     }

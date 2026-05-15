@@ -9,6 +9,7 @@ import path from 'path';
 import { pathToFileURL } from 'url';
 
 export const ADAPTERS_DIR = path.join(process.cwd(), 'data', 'adapters');
+export const ADAPTER_EXAMPLES_DIR = path.join(process.cwd(), 'examples', 'dynamic-adapters');
 
 const ADAPTER_ID_RE = /^[A-Za-z0-9._-]+$/;
 
@@ -16,10 +17,48 @@ export function ensureAdaptersDirSync() {
     if (!fs.existsSync(ADAPTERS_DIR)) {
         fs.mkdirSync(ADAPTERS_DIR, { recursive: true });
     }
+    seedDefaultAdaptersIfEmptySync();
 }
 
 export async function ensureAdaptersDir() {
     await fsp.mkdir(ADAPTERS_DIR, { recursive: true });
+    await seedDefaultAdaptersIfEmpty();
+}
+
+export function seedDefaultAdaptersIfEmptySync() {
+    if (!fs.existsSync(ADAPTER_EXAMPLES_DIR)) {
+        return;
+    }
+
+    const currentFiles = fs.readdirSync(ADAPTERS_DIR, { withFileTypes: true })
+        .filter(entry => entry.isFile() && entry.name.endsWith('.js'));
+    if (currentFiles.length > 0) {
+        return;
+    }
+
+    const exampleFiles = fs.readdirSync(ADAPTER_EXAMPLES_DIR, { withFileTypes: true })
+        .filter(entry => entry.isFile() && entry.name.endsWith('.js'));
+    for (const entry of exampleFiles) {
+        fs.copyFileSync(path.join(ADAPTER_EXAMPLES_DIR, entry.name), path.join(ADAPTERS_DIR, entry.name));
+    }
+}
+
+export async function seedDefaultAdaptersIfEmpty() {
+    try {
+        const currentFiles = (await fsp.readdir(ADAPTERS_DIR, { withFileTypes: true }))
+            .filter(entry => entry.isFile() && entry.name.endsWith('.js'));
+        if (currentFiles.length > 0) {
+            return;
+        }
+
+        const exampleEntries = (await fsp.readdir(ADAPTER_EXAMPLES_DIR, { withFileTypes: true }))
+            .filter(entry => entry.isFile() && entry.name.endsWith('.js'));
+        await Promise.all(exampleEntries.map(async (entry) => {
+            await fsp.copyFile(path.join(ADAPTER_EXAMPLES_DIR, entry.name), path.join(ADAPTERS_DIR, entry.name));
+        }));
+    } catch {
+        // ignore seeding failures, registry will continue loading existing files only
+    }
 }
 
 export function normalizeAdapterId(adapterId) {

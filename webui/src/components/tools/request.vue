@@ -60,6 +60,7 @@ const mediaCache = ref({});
 
 // 发送请求相关
 const sendModelList = ref([]);
+const sendModelCapabilities = ref({});
 const sendModel = ref('');
 const sendPrompt = ref('');
 const sendImageList = ref([]);
@@ -67,13 +68,52 @@ const sendStreamMode = ref(false);
 const sendReasoningMode = ref(true);
 const sending = ref(false);
 
+const currentSendModelMeta = computed(() => sendModelCapabilities.value[sendModel.value] || null);
+
 // 当前模型是否支持图片输入
 const currentModelSupportsImage = computed(() => {
-    if (!sendModel.value) return false;
-    const model = sendModelList.value.find(m => m.id === sendModel.value);
-    if (!model) return false;
-    return model.image_policy !== 'forbidden';
+    const providerTypes = currentSendModelMeta.value?.providerTypes || [];
+    return providerTypes.includes('openai-images-edits') || providerTypes.includes('openai-chat-completions');
 });
+
+const currentModelSupportsStream = computed(() => {
+    const providerTypes = currentSendModelMeta.value?.providerTypes || [];
+    return providerTypes.includes('openai-chat-completions');
+});
+
+watch(currentModelSupportsStream, (supported) => {
+    if (!supported) {
+        sendStreamMode.value = false;
+        sendReasoningMode.value = false;
+    }
+});
+
+function buildSendModelCapabilities(adaptersMeta) {
+    const capabilities = {};
+
+    for (const adapter of adaptersMeta || []) {
+        if (adapter.valid === false) continue;
+        for (const provider of adapter.providers || []) {
+            for (const modelId of provider.models || []) {
+                if (!capabilities[modelId]) {
+                    capabilities[modelId] = {
+                        providerTypes: [],
+                        adapterIds: []
+                    };
+                }
+
+                if (!capabilities[modelId].providerTypes.includes(provider.type)) {
+                    capabilities[modelId].providerTypes.push(provider.type);
+                }
+                if (!capabilities[modelId].adapterIds.includes(adapter.id)) {
+                    capabilities[modelId].adapterIds.push(adapter.id);
+                }
+            }
+        }
+    }
+
+    return capabilities;
+}
 
 // 自动刷新
 let autoRefreshInterval = null;
@@ -560,10 +600,16 @@ const clearSelection = () => {
 // 获取可用模型列表
 const fetchSendModelList = async () => {
     try {
+        await settingsStore.fetchAdaptersMeta();
+        sendModelCapabilities.value = buildSendModelCapabilities(settingsStore.adaptersMeta);
+
         const res = await fetch('/v1/models', { headers: settingsStore.getHeaders() });
         if (res.ok) {
             const data = await res.json();
-            sendModelList.value = data.data || [];
+            sendModelList.value = (data.data || []).map(model => ({
+                ...model,
+                providerTypes: sendModelCapabilities.value[model.id]?.providerTypes || []
+            }));
             if (sendModelList.value.length > 0 && !sendModel.value) {
                 sendModel.value = sendModelList.value[0].id;
             }
@@ -612,15 +658,45 @@ const handleSendImageChange = async (info) => {
     }
 };
 
-// 发送请求（fire-and-forget，不阻塞 UI）
-const sendRequest = () => {
-    if (!sendModel.value) {
-        message.warning('请选择模型');
-        return;
+const resolveSendProviderType = () => {
+    const providerTypes = currentSendModelMeta.value?.providerTypes || [];
+    const hasImages = sendImageList.value.length > 0;
+
+    if (hasImages && providerTypes.includes('openai-images-edits')) {
+        return 'openai-images-edits';
     }
-    if (!sendPrompt.value.trim()) {
-        message.warning('请输入提示词');
-        return;
+    if (!hasImages && providerTypes.includes('openai-images-generations')) {
+        return 'openai-images-generations';
+    }
+    if (providerTypes.includes('openai-chat-completions')) {
+        return 'openai-chat-completions';
+    }
+
+    return null;
+};
+
+const buildSendRequestPayload = (providerType) => {
+    if (providerType === 'openai-images-generations') {
+        return {
+            endpoint: '/v1/images/generations',
+            body: {
+                model: sendModel.value,
+                prompt: sendPrompt.value,
+                response_format: 'url'
+            }
+        };
+    }
+
+    if (providerType === 'openai-images-edits') {
+        return {
+            endpoint: '/v1/images/edits',
+            body: {
+                model: sendModel.value,
+                prompt: sendPrompt.value,
+                images: sendImageList.value.map(img => img.base64),
+                response_format: 'url'
+            }
+        };
     }
 
     let content;
@@ -642,25 +718,66 @@ const sendRequest = () => {
         body.reasoning = true;
     }
 
-    // 发射后不等待
-    fetch('/v1/chat/completions', {
-        method: 'POST',
-        headers: { ...settingsStore.getHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-    }).catch(() => { /* 网络错误静默处理，列表会显示失败状态 */ });
+    return {
+        endpoint: '/v1/chat/completions',
+        body
+    };
+};
 
-    message.success('请求已发送');
+// 发送请求（收到响应头后立即返回 UI）
+const sendRequest = async () => {
+    if (!sendModel.value) {
+        message.warning('请选择模型');
+        return;
+    }
+    if (!sendPrompt.value.trim()) {
+        message.warning('请输入提示词');
+        return;
+    }
 
-    // 清空输入，允许立即发下一个
-    sendPrompt.value = '';
-    sendImageList.value = [];
+    const providerType = resolveSendProviderType();
+    if (!providerType) {
+        message.error('当前模型没有可用的 provider 路由，请先确认适配器脚本已加载');
+        return;
+    }
 
-    // 启动自动刷新 + 1秒后立即刷一次以快速显示新记录
-    startAutoRefresh();
-    setTimeout(() => {
-        silentFetchHistory();
-        silentFetchStats();
-    }, 1000);
+    const { endpoint, body } = buildSendRequestPayload(providerType);
+
+    sending.value = true;
+    try {
+        const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { ...settingsStore.getHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+
+        if (!res.ok) {
+            let errMsg = `请求失败: ${res.status}`;
+            try {
+                const data = await res.json();
+                errMsg = data.error?.message || data.message || errMsg;
+            } catch { }
+            message.error(errMsg);
+            return;
+        }
+
+        message.success('请求已发送');
+
+        // 清空输入，允许立即发下一个
+        sendPrompt.value = '';
+        sendImageList.value = [];
+
+        // 启动自动刷新 + 1秒后立即刷一次以快速显示新记录
+        startAutoRefresh();
+        setTimeout(() => {
+            silentFetchHistory();
+            silentFetchStats();
+        }, 1000);
+    } catch (e) {
+        message.error(`请求失败: ${e.message}`);
+    } finally {
+        sending.value = false;
+    }
 };
 
 // 静默删除记录（不弹确认框）
@@ -785,9 +902,9 @@ onUnmounted(() => {
 
                 <!-- 选项 + 发送按钮 -->
                 <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
-                    <a-checkbox v-model:checked="sendStreamMode">流式响应</a-checkbox>
+                    <a-checkbox v-model:checked="sendStreamMode" :disabled="!currentModelSupportsStream">流式响应</a-checkbox>
                     <a-checkbox v-model:checked="sendReasoningMode">返回思考</a-checkbox>
-                    <a-button type="primary" @click="sendRequest" :disabled="!sendModel">
+                    <a-button type="primary" @click="sendRequest" :disabled="!sendModel" :loading="sending">
                         <template #icon><RocketOutlined /></template>
                         发送
                     </a-button>

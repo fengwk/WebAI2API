@@ -57,7 +57,8 @@ async function connectVnc() {
 
         // 构建 WebSocket URL
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/admin/vnc?token=${settingsStore.token}`;
+        const token = settingsStore.token ? `?token=${encodeURIComponent(settingsStore.token)}` : '';
+        const wsUrl = `${protocol}//${window.location.host}/admin/vnc${token}`;
 
         // 创建 RFB 实例
         rfb = new RFB(vncContainer.value, wsUrl, {
