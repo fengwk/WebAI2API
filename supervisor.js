@@ -131,6 +131,9 @@ let vncInfo = {
     xvfbMode: false
 };
 
+// Openbox 进程追踪
+let openboxProcess = null;
+
 /**
  * 启动 IPC 服务器
  */
@@ -384,6 +387,47 @@ async function startVncServer(display) {
     process.on('SIGTERM', () => vncProcess.kill('SIGTERM'));
 }
 
+/**
+ * 启动 Openbox 窗口管理器
+ * @param {string} display - 显示器编号
+ */
+function startOpenbox(display) {
+    if (!checkCommand('openbox')) {
+        log('WARN', '未找到 openbox 命令，跳过窗口管理器启动');
+        return;
+    }
+
+    if (openboxProcess && !openboxProcess.killed) {
+        return;
+    }
+
+    log('INFO', `正在启动 Openbox 窗口管理器 (DISPLAY=${display})...`);
+
+    openboxProcess = spawn('openbox', [], {
+        env: {
+            ...process.env,
+            DISPLAY: display
+        },
+        stdio: 'ignore',
+        detached: false
+    });
+
+    openboxProcess.on('error', (err) => {
+        log('WARN', `Openbox 启动失败: ${err.message}`);
+        openboxProcess = null;
+    });
+
+    openboxProcess.on('exit', (code, signal) => {
+        if (code !== 0 && code !== null) {
+            log('WARN', `Openbox 已退出 (code: ${code}${signal ? `, signal: ${signal}` : ''})`);
+        }
+        openboxProcess = null;
+    });
+
+    process.on('SIGINT', () => openboxProcess?.kill('SIGTERM'));
+    process.on('SIGTERM', () => openboxProcess?.kill('SIGTERM'));
+}
+
 // ==================== 主入口 ====================
 
 async function main() {
@@ -407,6 +451,7 @@ async function main() {
     // 如果在 Xvfb 中运行，启动 VNC
     if (isInXvfb && hasVnc) {
         const display = process.env.DISPLAY || ':99';
+        startOpenbox(display);
         await startVncServer(display);
     }
 

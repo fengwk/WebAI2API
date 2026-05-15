@@ -9,6 +9,7 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=true
 RUN apt-get update && apt-get install -y \
     xvfb \
     x11vnc \
+    openbox \
     libasound2 \
     libatk-bridge2.0-0 \
     libgtk-3-0 \
