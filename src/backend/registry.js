@@ -5,7 +5,7 @@
 
 import { logger } from '../utils/logger.js';
 import { ensureAdaptersDirSync, listAdapterFiles, importAdapterModule, ADAPTERS_DIR } from './adapterStore.js';
-import { getProvider, hasProvider } from './providers/registry.js';
+import { hasProvider } from './providers/registry.js';
 
 ensureAdaptersDirSync();
 
@@ -16,6 +16,10 @@ function createModelDescriptor(modelId) {
         created: Math.floor(Date.now() / 1000),
         owned_by: 'webai-2api'
     };
+}
+
+function getProviderModels(providerEntry) {
+    return Array.isArray(providerEntry?.models) ? providerEntry.models : [];
 }
 
 class AdapterRegistry {
@@ -92,38 +96,48 @@ class AdapterRegistry {
             errors.push('name 必须是字符串');
         }
 
-        if (!manifest.provider || typeof manifest.provider !== 'object') {
-            errors.push('缺少 provider 配置');
+        if (!Array.isArray(manifest.providers) || manifest.providers.length === 0) {
+            errors.push('providers 必须是非空数组');
         } else {
-            if (!manifest.provider.type || typeof manifest.provider.type !== 'string') {
-                errors.push('provider.type 缺失或类型不正确');
-            } else if (!hasProvider(manifest.provider.type)) {
-                errors.push(`未知 provider.type: ${manifest.provider.type}`);
-            }
+            const seenProviderKeys = new Set();
+            for (let i = 0; i < manifest.providers.length; i++) {
+                const providerEntry = manifest.providers[i];
+                const prefix = `providers[${i}]`;
 
-            if (manifest.provider.models !== undefined) {
-                if (!Array.isArray(manifest.provider.models)) {
-                    errors.push('provider.models 必须是数组');
+                if (!providerEntry || typeof providerEntry !== 'object') {
+                    errors.push(`${prefix} 必须是对象`);
+                    continue;
+                }
+
+                if (!providerEntry.type || typeof providerEntry.type !== 'string') {
+                    errors.push(`${prefix}.type 缺失或类型不正确`);
+                } else if (!hasProvider(providerEntry.type)) {
+                    errors.push(`未知 ${prefix}.type: ${providerEntry.type}`);
+                }
+
+                if (!Array.isArray(providerEntry.models) || providerEntry.models.length === 0) {
+                    errors.push(`${prefix}.models 必须是非空数组`);
                 } else {
-                    for (let i = 0; i < manifest.provider.models.length; i++) {
-                        if (!manifest.provider.models[i] || typeof manifest.provider.models[i] !== 'string') {
-                            errors.push(`provider.models[${i}] 必须是非空字符串`);
+                    for (let j = 0; j < providerEntry.models.length; j++) {
+                        const modelId = providerEntry.models[j];
+                        if (!modelId || typeof modelId !== 'string') {
+                            errors.push(`${prefix}.models[${j}] 必须是非空字符串`);
+                            continue;
+                        }
+
+                        const providerModelKey = `${providerEntry.type}:${modelId}`;
+                        if (seenProviderKeys.has(providerModelKey)) {
+                            errors.push(`${prefix}.models[${j}] 与其他 provider 项重复: ${providerEntry.type}/${modelId}`);
+                        } else {
+                            seenProviderKeys.add(providerModelKey);
                         }
                     }
                 }
+
+                if (typeof providerEntry.execute !== 'function') {
+                    errors.push(`${prefix}.execute 必须是函数`);
+                }
             }
-        }
-
-        if (!manifest.execute || typeof manifest.execute !== 'function') {
-            errors.push('缺少 execute 函数');
-        }
-
-        if (manifest.navigationHandlers !== undefined && !Array.isArray(manifest.navigationHandlers)) {
-            errors.push('navigationHandlers 必须是数组');
-        }
-
-        if (manifest.getTargetUrl !== undefined && typeof manifest.getTargetUrl !== 'function') {
-            errors.push('getTargetUrl 必须是函数');
         }
 
         return errors;
@@ -150,66 +164,66 @@ class AdapterRegistry {
         return this.adapters.has(id);
     }
 
-    getProviderByAdapterId(id) {
-        const adapter = this.getAdapter(id);
-        if (!adapter) return null;
-        return getProvider(adapter.provider.type);
+    getAdapterProviders(id) {
+        return this.getAdapter(id)?.providers || [];
     }
 
-    getProviderTypeByAdapterId(id) {
-        return this.getAdapter(id)?.provider?.type || null;
-    }
-
-    getTargetUrl(id, config, workerConfig) {
-        const adapter = this.getAdapter(id);
-        if (!adapter) return 'about:blank';
-        if (typeof adapter.getTargetUrl === 'function') {
-            return adapter.getTargetUrl(config, workerConfig) || 'about:blank';
+    getProviderEntries(adapterId, providerType = null) {
+        const providers = this.getAdapterProviders(adapterId);
+        if (!providerType) {
+            return providers;
         }
-        return adapter.targetUrl || 'about:blank';
+        return providers.filter(providerEntry => providerEntry.type === providerType);
     }
 
-    getNavigationHandlers(id) {
-        const adapter = this.getAdapter(id);
-        return adapter?.navigationHandlers || [];
+    resolveProviderEntry(adapterId, providerType, modelId = null) {
+        const candidates = this.getProviderEntries(adapterId, providerType);
+        if (candidates.length === 0) {
+            return null;
+        }
+
+        if (modelId) {
+            return candidates.find(providerEntry => getProviderModels(providerEntry)
+                .some(candidateModelId => candidateModelId === modelId && this.isModelEnabled(adapterId, candidateModelId))) || null;
+        }
+
+        return candidates.find(providerEntry => getProviderModels(providerEntry)
+            .some(candidateModelId => this.isModelEnabled(adapterId, candidateModelId))) || null;
     }
 
     getAdapterModels(id) {
-        const adapter = this.getAdapter(id);
-        if (!adapter) return [];
-        const models = adapter.provider?.models || [];
-        return models.filter(modelId => this.isModelEnabled(id, modelId));
+        const seen = new Set();
+        const models = [];
+        for (const providerEntry of this.getAdapterProviders(id)) {
+            for (const modelId of getProviderModels(providerEntry)) {
+                if (!this.isModelEnabled(id, modelId) || seen.has(modelId)) continue;
+                seen.add(modelId);
+                models.push(modelId);
+            }
+        }
+        return models;
     }
 
     supportsTask(adapterId, providerType, modelId) {
-        const adapter = this.getAdapter(adapterId);
-        if (!adapter || adapter.provider?.type !== providerType) {
-            return false;
-        }
-
-        const models = adapter.provider?.models || [];
-        if (!modelId) {
-            return models.length > 0;
-        }
-
-        return models.includes(modelId) && this.isModelEnabled(adapterId, modelId);
+        return !!this.resolveProviderEntry(adapterId, providerType, modelId);
     }
 
     getDefaultModel(providerType) {
-        for (const [adapterId, adapter] of this.adapters) {
-            if (adapter.provider?.type !== providerType) continue;
-            const models = this.getAdapterModels(adapterId);
-            if (models.length > 0) {
-                return models[0];
+        for (const adapterId of this.adapters.keys()) {
+            for (const providerEntry of this.getProviderEntries(adapterId, providerType)) {
+                const modelId = getProviderModels(providerEntry)
+                    .find(candidateModelId => this.isModelEnabled(adapterId, candidateModelId));
+                if (modelId) {
+                    return modelId;
+                }
             }
         }
         return null;
     }
 
     hasModel(providerType, modelId) {
-        for (const [adapterId, adapter] of this.adapters) {
-            if (adapter.provider?.type !== providerType) continue;
-            if (this.getAdapterModels(adapterId).includes(modelId)) {
+        for (const adapterId of this.adapters.keys()) {
+            if (this.resolveProviderEntry(adapterId, providerType, modelId)) {
                 return true;
             }
         }
@@ -226,6 +240,7 @@ class AdapterRegistry {
     getAllModels() {
         const seen = new Set();
         const data = [];
+
         for (const adapterId of this.adapters.keys()) {
             for (const modelId of this.getAdapterModels(adapterId)) {
                 if (seen.has(modelId)) continue;
@@ -233,6 +248,7 @@ class AdapterRegistry {
                 data.push(createModelDescriptor(modelId));
             }
         }
+
         return { object: 'list', data };
     }
 }

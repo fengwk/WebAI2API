@@ -252,38 +252,27 @@ WebUI 中的“虚拟显示器”并不是浏览器直连 `5900`，而是：
 推荐最小模板：
 
 ```js
-import { gotoWithCheck, waitForInput } from '../utils/index.js';
-
-const TARGET_URL = 'https://example.com/app';
-
-async function generate(context, prompt, imgPaths, modelId, meta = {}) {
-  const { page, config } = context;
-  const waitTimeout = config?.backend?.pool?.waitTimeout ?? 120000;
-
-  await gotoWithCheck(page, TARGET_URL);
-  await waitForInput(page, 'textarea');
-
-  // 1. 上传图片（如果支持）
-  // 2. 输入提示词
-  // 3. 点击发送
-  // 4. 监听页面请求或下载事件
-  // 5. 解析结果并返回
-
-  return { error: 'not implemented' };
-}
-
 export const manifest = {
   id: 'my_site',
-  displayName: 'My Site',
-  description: '示例适配器',
-  getTargetUrl() {
-    return TARGET_URL;
-  },
-  models: [
-    { id: 'my-site-image', imagePolicy: 'optional' }
+  name: 'My Site',
+  providers: [
+    {
+      type: 'openai-images-generations',
+      models: ['my-site-image'],
+      async execute(ctx, input) {
+        const { page, api } = ctx;
+        await page.goto('https://example.com/app', { waitUntil: 'domcontentloaded' });
+        api.log('info', '开始执行', { model: input.model });
+        return {
+          success: false,
+          error: {
+            message: 'not implemented',
+            retryable: false
+          }
+        };
+      }
+    }
   ],
-  navigationHandlers: [],
-  generate
 };
 ```
 
@@ -315,16 +304,15 @@ export const manifest = {
 
 这些工具能减少站点差异带来的重复代码。
 
-## 7.5 什么时候需要 `navigationHandlers`
+## 7.5 页面导航与状态收敛
 
-如果目标站点存在这些问题，可以加导航处理器：
+当前协议不再提供 `getTargetUrl` / `navigationHandlers`。
 
-- 首次打开需要点掉欢迎页
-- 需要自动跳转固定页面
-- 存在站点内轻量级引导弹窗
-- 某些登录后跳转页需要统一收敛
+原因：
 
-如果页面路径稳定、无需额外处理，`navigationHandlers: []` 即可。
+- 页面导航属于脚本实现细节
+- 一个 adapter 内可能包含多个 provider entry，不同 entry 未必去同一个 URL
+- 由 `execute()` 自己完成 `goto + 弹窗处理 + 页面收敛` 更直接
 
 ## 7.6 什么时候需要 `configSchema`
 

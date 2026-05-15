@@ -3,9 +3,7 @@ import { parseMultipartForm } from './multipart.js';
 
 function buildManifestLike(defaultModel) {
     return {
-        provider: {
-            models: defaultModel ? [defaultModel] : []
-        }
+        models: defaultModel ? [defaultModel] : []
     };
 }
 

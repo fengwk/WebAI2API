@@ -274,19 +274,6 @@ export const useSettingsStore = defineStore('settings', {
             }
             message.success(data.message || '脚本已删除');
             return true;
-        },
-
-        async testAdapter(adapterId, payload) {
-            const res = await fetch(`/admin/adapters/${encodeURIComponent(adapterId)}/test`, {
-                method: 'POST',
-                headers: this.getHeaders(),
-                body: JSON.stringify(payload)
-            });
-            const data = await res.json();
-            if (!res.ok) {
-                throw new Error(data.error?.message || data.message || `测试失败: ${res.status}`);
-            }
-            return data;
         }
     }
 });

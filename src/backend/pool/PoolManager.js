@@ -232,17 +232,6 @@ export class PoolManager {
     }
 
     /**
-     * 触发所有 merge Worker 的监控导航
-     */
-    async navigateToMonitor() {
-        for (const worker of this.workers) {
-            if (worker.type === 'merge' && worker.busyCount === 0) {
-                await worker.navigateToMonitor();
-            }
-        }
-    }
-
-    /**
      * 获取第一个 Worker 的 page
      */
     getFirstPage() {
@@ -254,29 +243,6 @@ export class PoolManager {
             return this.workers[0] || null;
         }
         return this.workers.find(worker => worker.name === workerName) || null;
-    }
-
-    async testAdapter(workerName, adapterId, task, meta = {}) {
-        const worker = this.getWorkerByName(workerName);
-        if (!worker) {
-            throw new Error(`Worker 不存在: ${workerName}`);
-        }
-
-        const adapter = registry.getAdapter(adapterId);
-        if (!adapter) {
-            throw new Error(`适配器不存在: ${adapterId}`);
-        }
-
-        const resolvedModelId = task.modelId || adapter.provider?.models?.[0] || null;
-        if (!resolvedModelId) {
-            throw new Error(`适配器 ${adapterId} 没有可用模型`);
-        }
-
-        return await worker.runAdapterTest(adapterId, {
-            ...task,
-            modelId: resolvedModelId,
-            providerType: adapter.provider.type
-        }, meta);
     }
 
     async runDebugScript(workerName, script, input, meta = {}, options = {}) {

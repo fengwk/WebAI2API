@@ -15,9 +15,7 @@ async function createTempDir(prefix) {
 test('chat provider normalizes prompt into messages for admin input', async () => {
     const tempDir = await createTempDir('webai-chat-');
     const manifest = {
-        provider: {
-            models: ['gpt-4o-mini']
-        }
+        models: ['gpt-4o-mini']
     };
 
     const result = await openaiChatCompletionsProvider.normalizeAdminInput({
@@ -62,9 +60,7 @@ test('image generations provider renders url and b64_json responses', async () =
 test('image edits provider normalizes base64 uploads', async () => {
     const tempDir = await createTempDir('webai-edit-');
     const manifest = {
-        provider: {
-            models: ['gpt-image-2']
-        }
+        models: ['gpt-image-2']
     };
     const dataUrl = 'data:image/png;base64,' + Buffer.from('edit-image').toString('base64');
 

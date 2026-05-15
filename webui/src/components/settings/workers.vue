@@ -277,8 +277,7 @@ const workerFormVisible = ref(false);
 const workerForm = ref({
         name: '',
         type: adapterOptions.value.find(o => o.value !== 'merge')?.value || 'merge',
-        mergeTypes: [],
-        mergeMonitor: ''
+        mergeTypes: []
     });
 
 // 添加Worker
@@ -288,8 +287,7 @@ const handleAddWorker = () => {
     workerForm.value = {
         name: `worker-${editForm.value.workers.length + 1}-${randomSuffix}`,
         type: adapterOptions.value.find(o => o.value !== 'merge')?.value || 'merge',
-        mergeTypes: [],
-        mergeMonitor: ''
+        mergeTypes: []
     };
     workerFormVisible.value = true;
 };
@@ -301,8 +299,7 @@ const handleEditWorker = (index) => {
     workerForm.value = {
         name: worker.name,
         type: worker.type,
-        mergeTypes: worker.mergeTypes ? [...worker.mergeTypes] : [],
-        mergeMonitor: worker.mergeMonitor || ''
+        mergeTypes: worker.mergeTypes ? [...worker.mergeTypes] : []
     };
     workerFormVisible.value = true;
 };
@@ -568,16 +565,13 @@ const handleRemoveWorker = (index) => {
                                 </template>
                                 <div>
                                     <div style="font-weight: 600;">{{ item.name }}</div>
-                                    <div style="font-size: 12px; color: #8c8c8c;">
-                                        类型: {{ getAdapterDisplayName(item.type) }}
-                                        <span v-if="item.type === 'merge'">
+                                     <div style="font-size: 12px; color: #8c8c8c;">
+                                         类型: {{ getAdapterDisplayName(item.type) }}
+                                         <span v-if="item.type === 'merge'">
                                             | 聚合: {{ item.mergeTypes?.map(getAdapterDisplayName).join(', ') || '无' }}
-                                            <span v-if="item.mergeMonitor">
-                                                | 监控: {{ getAdapterDisplayName(item.mergeMonitor) }}
-                                            </span>
-                                        </span>
-                                    </div>
-                                </div>
+                                         </span>
+                                     </div>
+                                 </div>
                             </a-list-item>
                         </template>
                     </a-list>
@@ -618,20 +612,6 @@ const handleRemoveWorker = (index) => {
                     </div>
                     <a-select v-model:value="workerForm.mergeTypes" mode="multiple" style="width: 100%"
                         placeholder="选择要聚合的适配器" :options="mergeableAdapterOptions">
-                    </a-select>
-                </div>
-
-                <div style="margin-bottom: 16px;">
-                    <div style="font-weight: 600; margin-bottom: 4px;">空闲监控后端</div>
-                    <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
-                        空闲时挂机监控的后端（可选）
-                    </div>
-                    <a-select v-model:value="workerForm.mergeMonitor" style="width: 100%" placeholder="选择监控后端（可留空）"
-                        allow-clear>
-                        <a-select-option value="">无</a-select-option>
-                        <a-select-option v-for="type in workerForm.mergeTypes" :key="type" :value="type">
-                            {{ getAdapterDisplayName(type) }}
-                        </a-select-option>
                     </a-select>
                 </div>
             </template>

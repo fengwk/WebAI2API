@@ -8,7 +8,6 @@ import path from 'path';
 import { logger } from '../../utils/logger.js';
 import { initBrowserBase, createCursor } from '../engine/launcher.js';
 import { registry } from '../registry.js';
-import { tryGotoWithCheck } from '../utils/page.js';
 import { saveRuntimeFile } from '../runtimeFiles.js';
 
 function createAdapterApi(workerName, instanceName, meta = {}, fileOutput = null, page = null) {
@@ -264,7 +263,6 @@ export class Worker {
 
         // Merge 模式专属
         this.mergeTypes = workerConfig.mergeTypes || [];
-        this.mergeMonitor = workerConfig.mergeMonitor || null;
 
         // 运行时状态
         this.browser = null;
@@ -290,41 +288,6 @@ export class Worker {
             fs.mkdirSync(this.userDataDir, { recursive: true });
         }
 
-        // 获取目标 URL
-        let targetUrl = 'about:blank';
-        if (this.type === 'merge') {
-            const firstType = this.mergeTypes[0];
-            targetUrl = registry.getTargetUrl(firstType, this.globalConfig, this.workerConfig) || 'about:blank';
-        } else {
-            targetUrl = registry.getTargetUrl(this.type, this.globalConfig, this.workerConfig) || 'about:blank';
-        }
-
-        // 登录模式下不注册导航处理器，避免自动登录干预用户操作
-        const isLoginMode = process.argv.some(arg => arg.startsWith('-login'));
-        let navigationHandler = null;
-
-        if (!isLoginMode) {
-            // 收集导航处理器
-            const handlers = [];
-            const typesToHandle = this.type === 'merge' ? this.mergeTypes : [this.type];
-            for (const type of typesToHandle) {
-                const typeHandlers = registry.getNavigationHandlers(type);
-                handlers.push(...typeHandlers);
-            }
-
-            navigationHandler = handlers.length > 0
-                ? async (page) => {
-                    for (const handler of handlers) {
-                        try {
-                            await handler(page);
-                        } catch (e) {
-                            logger.debug('工作池', `导航处理器执行失败: ${e.message}`);
-                        }
-                    }
-                }
-                : null;
-        }
-
         logger.info('工作池', `[${this.name}] 正在初始化浏览器...`);
         if (this.proxyConfig) {
             logger.info('工作池', `[${this.name}] 使用代理: ${this.proxyConfig.type}://${this.proxyConfig.host}:${this.proxyConfig.port}`);
@@ -333,10 +296,10 @@ export class Worker {
         }
 
         if (sharedBrowser) {
-            await this._initWithSharedBrowser(sharedBrowser, targetUrl, navigationHandler);
+            await this._initWithSharedBrowser(sharedBrowser);
             this._isBrowserOwner = false;
         } else {
-            await this._initNewBrowser(targetUrl, navigationHandler);
+            await this._initNewBrowser();
             this._isBrowserOwner = true;
         }
 
@@ -347,7 +310,7 @@ export class Worker {
      * 使用共享浏览器初始化
      * @private
      */
-    async _initWithSharedBrowser(sharedBrowser, targetUrl, navigationHandler) {
+    async _initWithSharedBrowser(sharedBrowser) {
         logger.info('工作池', `[${this.name}] 复用已有浏览器，创建新标签页...`);
         this.browser = sharedBrowser;
         this.page = await sharedBrowser.newPage();
@@ -358,18 +321,6 @@ export class Worker {
         // true 表示使用项目维护的 ghost-cursor
         if (humanizeCursorMode === true) {
             this.page.cursor = createCursor(this.page);
-        }
-
-        // 保存参数用于重新初始化
-        this._targetUrl = targetUrl;
-        this._navigationHandler = navigationHandler;
-
-        await this._navigateToTarget(targetUrl);
-
-        if (navigationHandler) {
-            this.page.on('framenavigated', async () => {
-                try { await navigationHandler(this.page); } catch (e) { /* ignore */ }
-            });
         }
 
         // 监听标签页关闭事件，自动重新创建（仅针对共享者）
@@ -412,13 +363,6 @@ export class Worker {
         if (humanizeCursorMode === true) {
             this.page.cursor = createCursor(this.page);
         }
-        await this._navigateToTarget(this._targetUrl || 'about:blank');
-
-        if (this._navigationHandler) {
-            this.page.on('framenavigated', async () => {
-                try { await this._navigationHandler(this.page); } catch (e) { /* ignore */ }
-            });
-        }
 
         // 重新注册标签页关闭处理器
         this._registerPageCloseHandler();
@@ -431,7 +375,7 @@ export class Worker {
      * 启动新浏览器初始化
      * @private
      */
-    async _initNewBrowser(targetUrl, navigationHandler) {
+    async _initNewBrowser() {
         const base = await initBrowserBase(this.globalConfig, {
             userDataDir: this.userDataDir,
             instanceName: this.instanceName,
@@ -447,23 +391,10 @@ export class Worker {
             this.page.cursor = createCursor(this.page);
         }
 
-        if (navigationHandler) {
-            this.page.on('framenavigated', async () => {
-                try { await navigationHandler(this.page); } catch (e) { /* ignore */ }
-            });
-        }
-
-        // 保存 navigationHandler 用于重新初始化
-        this._navigationHandler = navigationHandler;
-        this._targetUrl = targetUrl;
-
-        logger.info('工作池', `[${this.name}] 正在连接目标页面...`);
-        await this._navigateToTarget(targetUrl);
-
         // 登录模式：注册浏览器关闭事件（不阻塞，关闭后退出进程）
         const isLoginMode = process.argv.some(arg => arg.startsWith('-login'));
         if (isLoginMode) {
-            logger.info('工作池', `[${this.name}] 登录模式已就绪，请在浏览器中完成登录`);
+            logger.info('工作池', `[${this.name}] 登录模式已就绪，请在浏览器中手动访问目标站点并完成登录`);
             this.browser.on('close', () => {
                 logger.info('工作池', `[${this.name}] 浏览器已关闭，登录模式结束`);
                 process.exit(0);
@@ -499,7 +430,6 @@ export class Worker {
                             if (sharedCursorMode === true) {
                                 sharedWorker.page.cursor = createCursor(sharedWorker.page);
                             }
-                            await sharedWorker._navigateToTarget(sharedWorker._targetUrl || 'about:blank');
                             sharedWorker._registerPageCloseHandler();  // 重新注册标签页关闭处理器
                             sharedWorker.initialized = true;
                             logger.info('工作池', `[${sharedWorker.name}] 共享浏览器连接已恢复`);
@@ -517,35 +447,6 @@ export class Worker {
         }
 
         logger.info('工作池', `[${this.name}] 初始化完成`);
-    }
-
-    /**
-     * 导航到目标 URL
-     * @private
-     */
-    async _navigateToTarget(targetUrl) {
-        if (this.type === 'merge') {
-            let gotoSuccess = false;
-            for (const type of this.mergeTypes) {
-                const url = registry.getTargetUrl(type, this.globalConfig, this.workerConfig);
-                if (!url) continue;
-                const gotoResult = await tryGotoWithCheck(this.page, url, { timeout: 30000 });
-                if (!gotoResult.error) {
-                    gotoSuccess = true;
-                    logger.debug('工作池', `[${this.name}] 使用 ${type} 适配器初始化成功`);
-                    break;
-                }
-                logger.warn('工作池', `[${this.name}] ${type} 网站不可用，尝试下一个...`, { error: gotoResult.error });
-            }
-            if (!gotoSuccess) {
-                logger.warn('工作池', `[${this.name}] 所有适配器网站当前不可用，但 Worker 仍将初始化（请求时可能会失败）`);
-            }
-        } else {
-            const gotoResult = await tryGotoWithCheck(this.page, targetUrl, { timeout: 60000 });
-            if (gotoResult.error) {
-                logger.warn('工作池', `[${this.name}] 目标网站当前不可用: ${gotoResult.error}，但 Worker 仍将初始化`);
-            }
-        }
     }
 
     /**
@@ -640,13 +541,13 @@ export class Worker {
             }
         }
 
-        const adapter = registry.getAdapter(type);
-        if (!adapter) {
+        const providerEntry = registry.resolveProviderEntry(type, task.providerType, task.modelId);
+        if (!providerEntry) {
             return {
                 success: false,
                 data: null,
                 error: {
-                    message: `适配器不存在: ${type}`,
+                    message: `适配器 ${type} 不支持 provider=${task.providerType}, model=${task.modelId || 'default'}`,
                     retryable: false
                 }
             };
@@ -673,7 +574,7 @@ export class Worker {
 
         this.busyCount++;
         try {
-            const result = await adapter.execute(subContext, task.input);
+            const result = await providerEntry.execute(subContext, task.input);
             return normalizeExecutionResult(result);
         } catch (err) {
             logger.error('工作池', `[${this.name}] 适配器执行异常`, { error: err.message, ...meta });
@@ -687,74 +588,6 @@ export class Worker {
         }
     }
 
-    async runAdapterTest(adapterId, task, meta = {}) {
-        if (!this.initialized || !this.browser) {
-            await this._reinit();
-        }
-
-        const adapter = registry.getAdapter(adapterId);
-        if (!adapter) {
-            return {
-                success: false,
-                data: null,
-                error: {
-                    message: `适配器不存在: ${adapterId}`,
-                    retryable: false
-                }
-            };
-        }
-
-        const page = await this.browser.newPage();
-        page.authState = { isHandlingAuth: false };
-        const humanizeCursorMode = this.globalConfig?.browser?.humanizeCursor;
-        page._humanizeCursorMode = humanizeCursorMode;
-        if (humanizeCursorMode === true) {
-            page.cursor = createCursor(page);
-        }
-
-        if (this._navigationHandler) {
-            page.on('framenavigated', async () => {
-                try { await this._navigationHandler(page); } catch { }
-            });
-        }
-
-        const subContext = {
-            page,
-            context: this.browser,
-            config: this.globalConfig,
-            proxyConfig: this.proxyConfig,
-            userDataDir: this.userDataDir,
-            workerName: this.name,
-            instanceName: this.instanceName,
-            worker: {
-                name: this.name,
-                type: this.type,
-                instance: this.instanceName
-            },
-            api: createAdapterApi(this.name, this.instanceName, meta, task.fileOutput, page)
-        };
-
-        this.busyCount++;
-        try {
-            const result = await adapter.execute(subContext, task.input);
-            return normalizeExecutionResult(result);
-        } catch (err) {
-            logger.error('工作池', `[${this.name}] 适配器测试异常`, { error: err.message, ...meta });
-            return {
-                success: false,
-                data: null,
-                error: normalizeExecutionError(err)
-            };
-        } finally {
-            this.busyCount--;
-            try {
-                if (!page.isClosed()) {
-                    await page.close();
-                }
-            } catch { }
-        }
-    }
-
     /**
      * 重新初始化浏览器（崩溃恢复）
      * @private
@@ -764,7 +597,7 @@ export class Worker {
         this.browser = null;
         this.page = null;
 
-        await this._initNewBrowser(this._targetUrl || 'about:blank', this._navigationHandler || null);
+        await this._initNewBrowser();
         this.initialized = true;
         logger.info('工作池', `[${this.name}] 浏览器已成功重新初始化`);
     }
@@ -798,12 +631,6 @@ export class Worker {
         page._humanizeCursorMode = humanizeCursorMode;
         if (humanizeCursorMode === true) {
             page.cursor = createCursor(page);
-        }
-
-        if (this._navigationHandler) {
-            page.on('framenavigated', async () => {
-                try { await this._navigationHandler(page); } catch { }
-            });
         }
 
         if (options.timeout && Number(options.timeout) > 0) {
@@ -883,29 +710,6 @@ export class Worker {
                     }
                 } catch { }
             }
-        }
-    }
-
-    /**
-     * 导航到监控页面（空闲时）
-     */
-    async navigateToMonitor() {
-        if (this.type !== 'merge' || !this.mergeMonitor) return;
-        if (!this.page || this.page.isClosed()) return;
-
-        const targetUrl = registry.getTargetUrl(this.mergeMonitor, this.globalConfig, this.workerConfig);
-        if (!targetUrl) return;
-
-        const currentUrl = this.page.url();
-        try {
-            if (currentUrl.includes(new URL(targetUrl).hostname)) return;
-        } catch (e) { return; }
-
-        logger.info('工作池', `[${this.name}] 空闲，跳转监控: ${this.mergeMonitor}`);
-        try {
-            await this.page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        } catch (e) {
-            logger.warn('工作池', `[${this.name}] 监控跳转失败: ${e.message}`);
         }
     }
 

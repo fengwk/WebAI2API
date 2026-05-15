@@ -100,6 +100,17 @@ async function cleanupDebugArtifacts(tempDir, ttlMs = 30 * 60 * 1000) {
     } catch { }
 }
 
+function buildProviderMeta(providerEntry, adapterId = null) {
+    const provider = getProvider(providerEntry.type);
+    const models = Array.isArray(providerEntry.models) ? providerEntry.models : [];
+    return {
+        type: providerEntry.type,
+        models: adapterId ? models.filter(modelId => registry.isModelEnabled(adapterId, modelId)) : models,
+        modelCount: adapterId ? models.filter(modelId => registry.isModelEnabled(adapterId, modelId)).length : models.length,
+        inputSchema: provider?.buildInputSchema({ ...providerEntry, models: adapterId ? models.filter(modelId => registry.isModelEnabled(adapterId, modelId)) : models }) || { fields: [] }
+    };
+}
+
 async function inspectAdapterFile(file) {
     try {
         const module = await importAdapterModule(file.filePath);
@@ -110,9 +121,7 @@ async function inspectAdapterFile(file) {
                 valid: false,
                 error: '未导出 manifest',
                 name: file.id,
-                providerType: null,
-                inputSchema: { fields: [] },
-                models: []
+                providers: []
             };
         }
 
@@ -124,9 +133,9 @@ async function inspectAdapterFile(file) {
                 valid: false,
                 error: `manifest.id 必须与文件名一致 (${file.id})`,
                 name: manifest.name || file.id,
-                providerType: manifest.provider?.type || null,
-                inputSchema: { fields: [] },
-                models: manifest.provider?.models || []
+                providers: Array.isArray(manifest.providers)
+                    ? manifest.providers.filter(providerEntry => providerEntry && typeof providerEntry === 'object').map(providerEntry => buildProviderMeta(providerEntry, manifest.id))
+                    : []
             };
         }
 
@@ -138,13 +147,11 @@ async function inspectAdapterFile(file) {
                 valid: false,
                 error: errors.join('; '),
                 name: manifest.name || file.id,
-                providerType: manifest.provider?.type || null,
-                inputSchema: { fields: [] },
-                models: manifest.provider?.models || []
+                providers: Array.isArray(manifest.providers)
+                    ? manifest.providers.filter(providerEntry => providerEntry && typeof providerEntry === 'object').map(providerEntry => buildProviderMeta(providerEntry, manifest.id))
+                    : []
             };
         }
-
-        const provider = getProvider(manifest.provider.type);
 
         return {
             id: manifest.id,
@@ -152,10 +159,7 @@ async function inspectAdapterFile(file) {
             valid: true,
             error: null,
             name: manifest.name || manifest.id,
-            providerType: manifest.provider.type,
-            models: manifest.provider.models || [],
-            modelCount: manifest.provider.models?.length || 0,
-            inputSchema: provider?.buildInputSchema(manifest) || { fields: [] }
+            providers: manifest.providers.map(providerEntry => buildProviderMeta(providerEntry, manifest.id))
         };
     } catch (err) {
         return {
@@ -164,9 +168,7 @@ async function inspectAdapterFile(file) {
             valid: false,
             error: err.message,
             name: file.id,
-            providerType: null,
-            inputSchema: { fields: [] },
-            models: []
+            providers: []
         };
     }
 }
@@ -566,59 +568,6 @@ export function createAdminRouter(context) {
                 await deleteAdapterSource(adapterId);
                 await registry.reload();
                 sendJson(res, 200, { success: true, message: '适配器已删除' });
-                return;
-            }
-
-            // POST /admin/adapters/:id/test - 测试执行动态适配器
-            const adapterTestMatch = pathname.match(/^\/adapters\/([^/]+)\/test$/);
-            if (method === 'POST' && adapterTestMatch) {
-                const adapterId = normalizeAdapterId(decodeURIComponent(adapterTestMatch[1]));
-                await registry.reload();
-                if (!registry.hasAdapter(adapterId)) {
-                    sendApiError(res, { code: ERROR_CODES.INVALID_MODEL, message: '适配器当前无效，无法执行测试' });
-                    return;
-                }
-
-                const body = await readBody(req);
-                const workerName = body.workerName || null;
-                const requestId = buildRequestId();
-                const adapter = registry.getAdapter(adapterId);
-                const provider = adapter ? getProvider(adapter.provider.type) : null;
-                if (!adapter || !provider) {
-                    sendApiError(res, { code: ERROR_CODES.INVALID_MODEL, message: '适配器缺少有效 provider，无法执行测试' });
-                    return;
-                }
-
-                const normalized = await provider.normalizeAdminInput(body, {
-                    tempDir,
-                    requestId
-                }, adapter);
-
-                let poolContext = queueManager?.getPoolContext?.();
-                if (!poolContext) {
-                    poolContext = await queueManager.initializePool();
-                }
-
-                try {
-                    const result = await poolContext.poolManager.testAdapter(workerName, adapterId, {
-                        providerType: adapter.provider.type,
-                        modelId: normalized.modelId,
-                        input: normalized.input,
-                        fileOutput: {
-                            rootDir: path.join(process.cwd(), 'data', 'files', 'tests', requestId),
-                            urlBasePath: `/files/tests/${encodeURIComponent(requestId)}`
-                        }
-                    }, {
-                        id: requestId
-                    });
-                    sendJson(res, 200, { success: result.success, result });
-                } finally {
-                    for (const p of normalized.cleanupPaths || []) {
-                        try {
-                            await fs.unlink(p);
-                        } catch { }
-                    }
-                }
                 return;
             }
 

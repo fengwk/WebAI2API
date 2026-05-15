@@ -88,9 +88,7 @@ const queueManager = createQueueManager(
         initBrowser,
         executeTask,
         config,
-        navigateToMonitor: backend.navigateToMonitor
-            ? () => backend.navigateToMonitor()
-            : null,
+        navigateToMonitor: null,
         getCookies: backend.getCookies
             ? (workerName, domain) => backend.getCookies(workerName, domain)
             : null

@@ -193,8 +193,7 @@ export function getInstancesConfig() {
         workers: (inst.workers || []).map(w => ({
             name: w.name,
             type: w.type,
-            mergeTypes: w.mergeTypes || [],
-            mergeMonitor: w.mergeMonitor || null
+            mergeTypes: w.mergeTypes || []
         }))
     }));
 }
@@ -237,7 +236,6 @@ export function saveInstancesConfig(data) {
             };
             if (w.type === 'merge' && w.mergeTypes) {
                 worker.mergeTypes = w.mergeTypes;
-                if (w.mergeMonitor) worker.mergeMonitor = w.mergeMonitor;
             }
             return worker;
         });

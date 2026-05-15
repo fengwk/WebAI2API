@@ -218,9 +218,6 @@ export function validateInstancesConfig(data) {
                             }
                         }
                     }
-                    if (w.mergeMonitor && !w.mergeTypes?.includes(w.mergeMonitor)) {
-                        errors.push(`${wPrefix}: mergeMonitor "${w.mergeMonitor}" 必须是 mergeTypes 中的一个`);
-                    }
                 }
             }
         }

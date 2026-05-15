@@ -10,7 +10,7 @@
 当前动态适配器能力已经具备：
 
 - `/app/data/adapters/*.js` 动态脚本加载
-- WebUI 脚本编辑、保存、删除、测试
+- WebUI 脚本编辑、保存、删除
 - `/admin/debug/run` 远程临时脚本执行
 - VNC 可视化调试
 
@@ -40,7 +40,7 @@
 Adapter 只关心：
 
 - 它是谁
-- 它服务哪个 provider
+- 它暴露哪些 provider entry
 - 它怎么执行浏览器任务
 
 Adapter 不负责：
@@ -102,13 +102,20 @@ async execute(ctx, input)
 
 ```js
 export const manifest = {
-  id: 'chatgpt_image_generate',
-  name: 'ChatGPT Image Generate',
-  provider: {
-    type: 'openai-images-generations',
-    models: ['gpt-image-2']
-  },
-  execute
+  id: 'chatgpt',
+  name: 'ChatGPT',
+  providers: [
+    {
+      type: 'openai-images-generations',
+      models: ['gpt-image-2'],
+      execute
+    },
+    {
+      type: 'openai-images-edits',
+      models: ['gpt-image-2'],
+      execute
+    }
+  ]
 }
 ```
 
@@ -119,13 +126,14 @@ export const manifest = {
   - 必须与文件名一致
 - `name`
   - WebUI 展示名称
-- `provider.type`
-  - 当前脚本服务的 provider 类型
-- `provider.models`
-  - 该 provider 下支持的模型列表
-  - 对于不需要模型路由的 provider，可省略
-- `execute`
-  - 唯一执行入口
+- `providers`
+  - 当前站点脚本暴露的 provider entry 列表
+- `providers[].type`
+  - provider 类型
+- `providers[].models`
+  - 该 provider entry 支持的模型列表
+- `providers[].execute`
+  - 对应 provider entry 的执行入口
 
 ### 非目标字段
 
@@ -709,9 +717,10 @@ provider: {
 当前流程改成：
 
 1. 选择 Adapter
-2. 读取 `manifest.provider.type`
-3. 从 Provider Registry 获取 `inputSchema`
-4. 渲染调试表单
+2. 读取 `manifest.providers[]`
+3. 选择目标 provider entry
+4. 从 Provider Registry 获取 `inputSchema`
+5. 渲染调试表单
 
 ## 10.2 调试接口
 

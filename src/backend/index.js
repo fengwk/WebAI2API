@@ -112,15 +112,6 @@ export function getBackend() {
         },
 
         /**
-         * 触发监控导航（空闲时）
-         */
-        navigateToMonitor: async () => {
-            if (poolManager) {
-                await poolManager.navigateToMonitor();
-            }
-        },
-
-        /**
          * 获取 PoolManager 实例
          * @returns {PoolManager|null}
          */

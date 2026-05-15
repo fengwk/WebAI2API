@@ -8,8 +8,18 @@ export function coerceInputPayload(body) {
     return body || {};
 }
 
-export function pickDefaultModel(manifest, requestedModel = null) {
-    const models = manifest?.provider?.models || [];
+export function getConfiguredModels(definition) {
+    if (Array.isArray(definition?.models)) {
+        return definition.models;
+    }
+    if (Array.isArray(definition?.provider?.models)) {
+        return definition.provider.models;
+    }
+    return [];
+}
+
+export function pickDefaultModel(definition, requestedModel = null) {
+    const models = getConfiguredModels(definition);
     if (requestedModel) {
         return String(requestedModel);
     }
@@ -54,8 +64,8 @@ export function normalizeResponseFormat(value) {
     return normalized;
 }
 
-export function buildModelField(manifest) {
-    const models = manifest?.provider?.models || [];
+export function buildModelField(definition) {
+    const models = getConfiguredModels(definition);
     return {
         key: 'model',
         label: '模型',

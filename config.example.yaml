@@ -63,16 +63,14 @@ backend:
         # 使用 Google OAuth 等统一登录时，只需登录一次即可用于所有 Worker
         
         # 该浏览器实例具备的能力 (动态适配器列表)
-        # 相当于在这个浏览器里打开了不同的标签页
+        # 相当于为同一套登录态/代理配置挂载不同站点脚本
         # type 必须填写 data/adapters/*.js 中 manifest.id
         workers:
           - name: "default"            # 唯一标识 (用于登录模式和日志显示)
             # 动态适配器示例:
-            #   chatgpt_image_generate
-            #   chatgpt_image_edit
-            #   gemini_image_generate
-            #   gemini_image_edit
-            type: chatgpt_image_generate
+            #   chatgpt
+            #   gemini
+            type: chatgpt
 
       # ------------------------------------------------
       # 以下为多实例配置示例 (默认注释)
@@ -98,11 +96,10 @@ backend:
       #     - name: "us_zai"
       #       type: zai_is
       #     
-      #     # 聚合类型 Worker (单标签多后端)
+      #     # 聚合类型 Worker (跨站点聚合/故障转移)
       #     - name: "us_merged"
       #       type: merge
-      #       mergeTypes: [gemini_biz, nanobananafree_ai]
-      #       mergeMonitor: gemini_biz  # 空闲时挂机监控的后端 (可选，留空则不启用)
+      #       mergeTypes: [chatgpt, gemini]
 
       # [实例 3] 强制直连 (不使用代理)
       # - name: "browser_direct"
@@ -119,7 +116,7 @@ backend:
   # 键为动态适配器 ID，值为脚本自定义配置
   # ========================================
   adapter:
-    chatgpt_image_generate:
+    chatgpt:
       # modelFilter 可用于过滤该适配器暴露的模型列表
       # modelFilter:
       #   mode: whitelist

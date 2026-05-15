@@ -179,7 +179,6 @@ function flattenInstancesToWorkers(instances, globalProxy) {
                 name: worker.name,
                 type: worker.type,
                 mergeTypes: worker.mergeTypes || [],
-                mergeMonitor: worker.mergeMonitor || null,
 
                 // 从 Instance 继承的属性
                 instanceName: instance.name,

@@ -27,8 +27,8 @@ async function uploadFiles(page, images) {
   await chooser.setFiles(imagePaths);
 }
 
-async function downloadImage(api, page, url) {
-  const resp = await page.request.get(url, { timeout: 120000 });
+async function downloadImage(api, page, url, timeout = 120000) {
+  const resp = await page.request.get(url, { timeout });
   if (!resp.ok()) {
     throw new Error(`图片下载失败: HTTP ${resp.status()}`);
   }
@@ -158,83 +158,111 @@ function buildPrompt(input) {
   return `${prompt}\n\n将宽高比设置为 ${size}`;
 }
 
-export const manifest = {
-  id: 'gemini_image_generate',
-  name: 'Gemini Image Generate',
-  provider: {
-    type: 'openai-images-generations',
-    models: ['gemini-3-pro-image-preview']
-  },
-  navigationHandlers: [],
-  getTargetUrl() {
-    return TARGET_URL;
-  },
-  async execute(ctx, input) {
-    const { page, api, config } = ctx;
-    const waitTimeout = config?.backend?.pool?.waitTimeout ?? 300000;
-    const prompt = buildPrompt(input);
-    const images = input.images || [];
+async function executeGeminiImage(ctx, input) {
+  const { page, api, config } = ctx;
+  const waitTimeout = config?.backend?.pool?.waitTimeout ?? 300000;
+  const prompt = buildPrompt(input);
+  const images = input.images || [];
 
-    api.log('info', '打开 Gemini 页面', {
-      model: input.model,
-      promptLength: prompt.length,
-      imageCount: images.length
-    });
-    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  api.log('info', '打开 Gemini 页面', {
+    providerType: input.providerType,
+    model: input.model,
+    promptLength: prompt.length,
+    imageCount: images.length
+  });
 
-    const inputLocator = await waitForInput(page);
-    await sleep(500);
+  await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-    if (images.length > 0) {
-      await uploadFiles(page, images);
-      await sleep(3000);
+  const useTempChat = config?.backend?.adapter?.gemini?.temporaryChat || false;
+  if (useTempChat) {
+    try {
+      await page.getByRole('button', { name: 'Temporary chat' }).click({ timeout: 3000 });
+    } catch {
+      // ignore
     }
+  }
 
-    await page.getByRole('button', { name: 'Tools' }).click({ timeout: 10000 });
-    await page.getByRole('menuitemcheckbox', { name: 'Create image' }).click({ timeout: 10000 });
-    await inputLocator.click({ timeout: 10000 });
-    await page.keyboard.insertText(prompt);
+  const inputLocator = await waitForInput(page);
+  await sleep(500);
 
-    const responsePromise = page.waitForResponse((response) => {
-      return response.url().includes('assistant.lamda.BardFrontendService/StreamGenerate') && response.request().method() === 'POST';
-    }, { timeout: waitTimeout });
+  if (images.length > 0) {
+    api.log('info', '开始上传参考图片', { count: images.length });
+    await uploadFiles(page, images);
+    await sleep(3000);
+  }
 
-    await page.getByRole('button', { name: 'Send message' }).click({ timeout: 10000 });
-    const streamResponse = await responsePromise;
-    if (!streamResponse.ok()) {
-      return {
-        success: false,
-        error: {
-          message: `API 返回错误: HTTP ${streamResponse.status()}`,
-          retryable: true
-        }
-      };
-    }
+  await page.getByRole('button', { name: 'Tools' }).click({ timeout: 10000 });
+  await page.getByRole('menuitemcheckbox', { name: 'Create image' }).click({ timeout: 10000 });
 
-    const bodyBuffer = await streamResponse.body();
-    const imageUrls = extractImageUrlsFromResponse(bodyBuffer);
-    if (imageUrls.length === 0) {
-      const text = extractAiTextFromResponse(bodyBuffer);
-      return {
-        success: false,
-        error: {
-          message: text ? text.substring(0, 200) : '响应中未找到图片结果',
-          retryable: false
-        }
-      };
-    }
+  await inputLocator.click({ timeout: 10000 });
+  await page.keyboard.insertText(prompt);
 
-    const file = await downloadImage(api, page, `${imageUrls[0]}=d-I`);
+  const responsePromise = page.waitForResponse((response) => {
+    return response.url().includes('assistant.lamda.BardFrontendService/StreamGenerate') && response.request().method() === 'POST';
+  }, { timeout: waitTimeout });
+
+  await page.getByRole('button', { name: 'Send message' }).click({ timeout: 10000 });
+  const streamResponse = await responsePromise;
+  if (!streamResponse.ok()) {
     return {
-      success: true,
-      data: {
-        created: Math.floor(Date.now() / 1000),
-        images: [
-          {
-            file
-          }
-        ]
+      success: false,
+      error: {
+        message: `API 返回错误: HTTP ${streamResponse.status()}`,
+        retryable: true
       }
     };
   }
+
+  const bodyBuffer = await streamResponse.body();
+  const imageUrls = extractImageUrlsFromResponse(bodyBuffer);
+  if (imageUrls.length === 0) {
+    const text = extractAiTextFromResponse(bodyBuffer);
+    return {
+      success: false,
+      error: {
+        message: text ? text.substring(0, 200) : '响应中未找到图片结果',
+        retryable: false
+      }
+    };
+  }
+
+  const file = await downloadImage(api, page, `${imageUrls[0]}=d-I`);
+  return {
+    success: true,
+    data: {
+      created: Math.floor(Date.now() / 1000),
+      images: [
+        {
+          file
+        }
+      ]
+    }
+  };
+}
+
+export const manifest = {
+  id: 'gemini',
+  name: 'Gemini',
+  providers: [
+    {
+      type: 'openai-images-generations',
+      models: ['gemini-3-pro-image-preview'],
+      async execute(ctx, input) {
+        return await executeGeminiImage(ctx, {
+          ...input,
+          providerType: 'openai-images-generations'
+        });
+      }
+    },
+    {
+      type: 'openai-images-edits',
+      models: ['gemini-3-pro-image-preview'],
+      async execute(ctx, input) {
+        return await executeGeminiImage(ctx, {
+          ...input,
+          providerType: 'openai-images-edits'
+        });
+      }
+    }
+  ]
 };
