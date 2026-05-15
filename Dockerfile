@@ -32,6 +32,7 @@ RUN npm install -g pnpm@10.33.4 && pnpm install --frozen-lockfile
 # 3. 复制源码并初始化
 COPY . .
 RUN npm run init
+RUN cd webui && npm install && npm run build
 
 EXPOSE 3000 5900
 
