@@ -66,7 +66,6 @@ const sendPrompt = ref('');
 const sendImageList = ref([]);
 const sendStreamMode = ref(false);
 const sendReasoningMode = ref(true);
-const sending = ref(false);
 
 const currentSendModelMeta = computed(() => sendModelCapabilities.value[sendModel.value] || null);
 
@@ -724,7 +723,32 @@ const buildSendRequestPayload = (providerType) => {
     };
 };
 
-// 发送请求（收到响应头后立即返回 UI）
+const dispatchRequestInBackground = async (endpoint, body) => {
+    try {
+        const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { ...settingsStore.getHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+
+        if (!res.ok) {
+            let errMsg = `请求失败: ${res.status}`;
+            try {
+                const data = await res.json();
+                errMsg = data.error?.message || data.message || errMsg;
+            } catch { }
+            message.error(errMsg);
+            await silentFetchHistory();
+            await silentFetchStats();
+        }
+    } catch (e) {
+        message.error(`无法连接后端服务: ${e.message}`);
+        await silentFetchHistory();
+        await silentFetchStats();
+    }
+};
+
+// 发送请求（fire-and-forget，立即回到可编辑状态）
 const sendRequest = async () => {
     if (!sendModel.value) {
         message.warning('请选择模型');
@@ -743,41 +767,19 @@ const sendRequest = async () => {
 
     const { endpoint, body } = buildSendRequestPayload(providerType);
 
-    sending.value = true;
-    try {
-        const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { ...settingsStore.getHeaders(), 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        });
+    dispatchRequestInBackground(endpoint, body);
+    message.success('请求已发送');
 
-        if (!res.ok) {
-            let errMsg = `请求失败: ${res.status}`;
-            try {
-                const data = await res.json();
-                errMsg = data.error?.message || data.message || errMsg;
-            } catch { }
-            message.error(errMsg);
-            return;
-        }
+    // 清空输入，允许立即发下一个
+    sendPrompt.value = '';
+    sendImageList.value = [];
 
-        message.success('请求已发送');
-
-        // 清空输入，允许立即发下一个
-        sendPrompt.value = '';
-        sendImageList.value = [];
-
-        // 启动自动刷新 + 1秒后立即刷一次以快速显示新记录
-        startAutoRefresh();
-        setTimeout(() => {
-            silentFetchHistory();
-            silentFetchStats();
-        }, 1000);
-    } catch (e) {
-        message.error(`请求失败: ${e.message}`);
-    } finally {
-        sending.value = false;
-    }
+    // 启动自动刷新，并尽快刷新一次让新任务显示出来
+    startAutoRefresh();
+    setTimeout(() => {
+        silentFetchHistory();
+        silentFetchStats();
+    }, 500);
 };
 
 // 静默删除记录（不弹确认框）
@@ -853,7 +855,7 @@ const startAutoRefresh = () => {
     autoRefreshInterval = setInterval(() => {
         silentFetchHistory();
         silentFetchStats();
-    }, 5000);
+    }, 3000);
 };
 
 const stopAutoRefresh = () => {
@@ -870,6 +872,7 @@ onMounted(() => {
     fetchStats();
     fetchModels();
     fetchSendModelList();
+    startAutoRefresh();
 });
 
 onUnmounted(() => {
@@ -904,7 +907,7 @@ onUnmounted(() => {
                 <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
                     <a-checkbox v-model:checked="sendStreamMode" :disabled="!currentModelSupportsStream">流式响应</a-checkbox>
                     <a-checkbox v-model:checked="sendReasoningMode">返回思考</a-checkbox>
-                    <a-button type="primary" @click="sendRequest" :disabled="!sendModel" :loading="sending">
+                    <a-button type="primary" @click="sendRequest" :disabled="!sendModel">
                         <template #icon><RocketOutlined /></template>
                         发送
                     </a-button>

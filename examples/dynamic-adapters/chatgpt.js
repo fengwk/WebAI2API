@@ -37,6 +37,36 @@ async function waitForComposer(page, timeout = 30000) {
   throw new Error('未找到 ChatGPT 输入框');
 }
 
+function getGeneratedImageSelector() {
+  return 'img[alt*="已生成图片"], img[alt*="Generated image"]';
+}
+
+async function getGeneratedImageKey(imageLocator) {
+  return await imageLocator.evaluate((img) => {
+    const src = img.currentSrc || img.getAttribute('src') || '';
+    const alt = img.getAttribute('alt') || '';
+    const id = img.id || '';
+    return `${id}|${alt}|${src}`;
+  });
+}
+
+async function collectExistingGeneratedImageKeys(page) {
+  const locator = page.locator(getGeneratedImageSelector());
+  const count = await locator.count();
+  const keys = new Set();
+
+  for (let i = 0; i < count; i++) {
+    const item = locator.nth(i);
+    try {
+      keys.add(await getGeneratedImageKey(item));
+    } catch {
+      // ignore detached nodes
+    }
+  }
+
+  return keys;
+}
+
 async function startNewChatIfPossible(page) {
   await clickFirstAvailable([
     page.getByRole('button', { name: /新聊天/i }),
@@ -75,6 +105,7 @@ async function enableImageMode(page, api) {
 async function uploadFiles(page, images, api) {
   if (!images?.length) return;
 
+  let uploadedCount = 0;
   for (const image of images) {
     if (!image?.path) continue;
 
@@ -84,8 +115,101 @@ async function uploadFiles(page, images, api) {
     const uploadInput = page.locator('#upload-files').first();
     await uploadInput.waitFor({ timeout: 5000, state: 'attached' });
     await uploadInput.setInputFiles(image.path);
-    await sleep(1500);
+    uploadedCount += 1;
+    await waitForUploadTilesSettled(page, uploadedCount, 60000, api);
   }
+}
+
+function getUploadTileLocator(page) {
+  return page.locator([
+    'button[aria-label*="用户上传的图片"]',
+    'button[aria-label*="uploaded image"]',
+    'button[aria-label*="Uploaded image"]'
+  ].join(', '));
+}
+
+function getUploadPendingLocator(page) {
+  return page.locator([
+    'div[role="group"][aria-label] .cursor-wait',
+    'div[role="group"][aria-label] svg circle[stroke-dasharray]'
+  ].join(', '));
+}
+
+async function waitForUploadTilesSettled(page, expectedCount, timeout = 60000, api = null) {
+  const start = Date.now();
+  const tiles = getUploadTileLocator(page);
+  const pending = getUploadPendingLocator(page);
+  let lastState = null;
+
+  while (Date.now() - start < timeout) {
+    const tileCount = await tiles.count().catch(() => 0);
+    const pendingCount = await pending.count().catch(() => 0);
+
+    const state = `${tileCount}/${expectedCount}:${pendingCount}`;
+    if (api && state !== lastState) {
+      lastState = state;
+      api.log('debug', '等待上传图片处理完成', {
+        expectedCount,
+        tileCount,
+        pendingCount
+      });
+    }
+
+    if (tileCount >= expectedCount && pendingCount === 0) {
+      await sleep(500);
+      return;
+    }
+
+    await sleep(500);
+  }
+
+  throw new Error('等待上传图片处理完成超时');
+}
+
+async function findSendButton(page) {
+  const candidates = [
+    page.getByRole('button', { name: /^发送提示$/i }),
+    page.getByRole('button', { name: /^Send prompt$/i }),
+    page.getByRole('button', { name: /^Send message$/i }),
+    page.locator("[data-testid='send-button']")
+  ];
+
+  for (const candidate of candidates) {
+    const button = candidate.first();
+    try {
+      if (await button.isVisible()) {
+        return button;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+
+  return null;
+}
+
+async function waitForSendReady(page, timeout = 30000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    const button = await findSendButton(page);
+    if (button) {
+      try {
+        const disabled = await button.evaluate((el) => {
+          return el.disabled || el.getAttribute('aria-disabled') === 'true';
+        });
+        if (!disabled) {
+          return button;
+        }
+      } catch {
+        // ignore detached or transient node state
+      }
+    }
+
+    await sleep(300);
+  }
+
+  throw new Error('等待发送按钮可点击超时');
 }
 
 function extractConversationText(conversationBody) {
@@ -132,23 +256,29 @@ function buildPrompt(input) {
   return `${prompt}\n\n将宽高比设置为 ${size}`;
 }
 
-async function waitForGeneratedImage(page, timeout) {
-  const candidates = [
-    page.locator('img[src*="/backend-api/estuary/content?id=file_"]'),
-    page.locator('img[src*="backend-api/estuary/content?id=file_"]'),
-    page.getByRole('img', { name: /已生成图片/i }),
-    page.getByRole('img', { name: /Generated image/i }),
-    page.locator('img[alt*="已生成图片"]'),
-    page.locator('img[alt*="Generated image"]')
-  ];
+async function waitForGeneratedImage(page, timeout, existingKeys = new Set()) {
+  const locator = page.locator(getGeneratedImageSelector());
+  const start = Date.now();
 
-  for (const locator of candidates) {
-    try {
-      await locator.last().waitFor({ timeout, state: 'visible' });
-      return locator.last();
-    } catch {
-      // try next locator
+  while (Date.now() - start < timeout) {
+    const count = await locator.count();
+    for (let i = 0; i < count; i++) {
+      const item = locator.nth(i);
+      try {
+        if (!(await item.isVisible())) {
+          continue;
+        }
+
+        const key = await getGeneratedImageKey(item);
+        if (!existingKeys.has(key)) {
+          return item;
+        }
+      } catch {
+        // ignore detached or transient nodes
+      }
     }
+
+    await sleep(500);
   }
 
   throw new Error('等待生成图片超时');
@@ -247,12 +377,9 @@ async function downloadImageViaViewer(api, page, imageLocator) {
 
 async function submitPrompt(page, api) {
   api.log('info', '发送提示词');
-  const clicked = await clickFirstAvailable([
-    page.getByRole('button', { name: /^发送提示$/i }),
-    page.getByRole('button', { name: /^Send prompt$/i }),
-    page.getByRole('button', { name: /^Send message$/i }),
-    page.locator("[data-testid='send-button']")
-  ], { timeout: 5000 });
+  await waitForUploadTilesSettled(page, 0, 30000).catch(() => {});
+  const sendButton = await waitForSendReady(page, 30000);
+  const clicked = await clickFirstAvailable([sendButton], { timeout: 5000 });
 
   if (!clicked) {
     await page.keyboard.press('Enter');
@@ -281,17 +408,20 @@ async function executeChatgptImage(ctx, input) {
 
   if (images.length > 0) {
     await uploadFiles(page, images, api);
+    await waitForUploadTilesSettled(page, images.filter(image => image?.path).length, 60000, api);
   }
 
   await composer.click({ timeout: 10000 });
   await composer.fill('');
   await composer.fill(prompt);
 
+  const existingImageKeys = await collectExistingGeneratedImageKeys(page);
+
   const conversationPromise = page.waitForResponse((response) => {
     return response.url().includes('backend-api/f/conversation') && response.request().method() === 'POST';
   }, { timeout: waitTimeout });
 
-  const imagePromise = waitForGeneratedImage(page, Math.max(waitTimeout, 180000));
+  const imagePromise = waitForGeneratedImage(page, Math.max(waitTimeout, 180000), existingImageKeys);
 
   await submitPrompt(page, api);
 
@@ -338,14 +468,14 @@ async function executeChatgptImage(ctx, input) {
 
   try {
     const imageLocator = await imagePromise;
-    api.log('info', '检测到已生成图片，尝试通过查看器保存');
+    api.log('info', '检测到已生成图片，优先直接下载图片源');
 
     let file;
     try {
-      file = await downloadImageViaViewer(api, page, imageLocator);
-    } catch (viewerError) {
-      api.log('warn', '查看器保存失败，回退为直接提取图片源', { error: viewerError.message });
       file = await extractImageFile(api, page, imageLocator);
+    } catch (directError) {
+      api.log('warn', '直接下载图片源失败，回退为查看器保存', { error: directError.message });
+      file = await downloadImageViaViewer(api, page, imageLocator);
     }
 
     return {
