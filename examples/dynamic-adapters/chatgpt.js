@@ -41,6 +41,18 @@ function getGeneratedImageSelector() {
   return 'img[alt*="已生成图片"], img[alt*="Generated image"]';
 }
 
+function getAssistantMessageSelector() {
+  return '[data-message-author-role="assistant"]';
+}
+
+function isAssistantErrorText(text) {
+  return /guardrails|nudity|sexuality|erotic|violat|policy|rate limit|we[’']?re so sorry|retry or edit|usage policies|our policies|内容可能违反|使用政策|给此回复点个[“"]?踩|抱歉|违规|限制|重试/i.test(text);
+}
+
+function isAssistantProgressText(text) {
+  return /analyzing images|正在思考|正在生成更细致的图片|generating a more detailed image|please wait/i.test(text);
+}
+
 async function getGeneratedImageKey(imageLocator) {
   return await imageLocator.evaluate((img) => {
     const src = img.currentSrc || img.getAttribute('src') || '';
@@ -59,6 +71,64 @@ async function collectExistingGeneratedImageKeys(page) {
     const item = locator.nth(i);
     try {
       keys.add(await getGeneratedImageKey(item));
+    } catch {
+      // ignore detached nodes
+    }
+  }
+
+  return keys;
+}
+
+async function getAssistantMessageData(locator) {
+  return await locator.evaluate((root) => {
+    const texts = [];
+    const pushText = (value) => {
+      const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+      if (normalized && !texts.includes(normalized)) {
+        texts.push(normalized);
+      }
+    };
+
+    const selectors = [
+      '.text-token-text-error',
+      '.markdown',
+      '[data-testid="image-gen-loading-state-frame"]',
+      '[data-testid="image-gen-loading-state"]'
+    ];
+
+    for (const selector of selectors) {
+      root.querySelectorAll(selector).forEach((node) => {
+        pushText(node.innerText || node.textContent || '');
+      });
+    }
+
+    if (texts.length === 0) {
+      pushText(root.innerText || root.textContent || '');
+    }
+
+    const messageId = root.getAttribute('data-message-id') ||
+      root.closest('[data-turn-id]')?.getAttribute('data-turn-id') ||
+      '';
+
+    return {
+      key: messageId || texts.join('|').slice(0, 200),
+      text: texts.join('\n')
+    };
+  });
+}
+
+async function collectExistingAssistantTextKeys(page) {
+  const locator = page.locator(getAssistantMessageSelector());
+  const count = await locator.count().catch(() => 0);
+  const keys = new Set();
+
+  for (let i = 0; i < count; i++) {
+    const item = locator.nth(i);
+    try {
+      const data = await getAssistantMessageData(item);
+      if (data.text) {
+        keys.add(data.key);
+      }
     } catch {
       // ignore detached nodes
     }
@@ -168,6 +238,7 @@ async function waitForUploadTilesSettled(page, expectedCount, timeout = 60000, a
 
 async function findSendButton(page) {
   const candidates = [
+    page.locator('#composer-submit-button'),
     page.getByRole('button', { name: /^发送提示$/i }),
     page.getByRole('button', { name: /^Send prompt$/i }),
     page.getByRole('button', { name: /^Send message$/i }),
@@ -253,35 +324,230 @@ function buildPrompt(input) {
   const prompt = String(input.prompt || '').trim();
   const size = String(input.size || '').trim();
   if (!size) return prompt;
-  return `${prompt}\n\n将宽高比设置为 ${size}`;
+  return `${prompt}\n\n将宽高比设置为${size}`;
+}
+
+async function setComposerPrompt(page, composer, prompt) {
+  await composer.click({ timeout: 10000 });
+  await composer.fill('');
+
+  const lines = String(prompt || '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]) {
+      await page.keyboard.insertText(lines[i]);
+    }
+
+    if (i < lines.length - 1) {
+      await page.keyboard.down('Shift');
+      await page.keyboard.press('Enter');
+      await page.keyboard.up('Shift');
+    }
+  }
 }
 
 async function waitForGeneratedImage(page, timeout, existingKeys = new Set()) {
-  const locator = page.locator(getGeneratedImageSelector());
   const start = Date.now();
 
   while (Date.now() - start < timeout) {
-    const count = await locator.count();
-    for (let i = 0; i < count; i++) {
-      const item = locator.nth(i);
-      try {
-        if (!(await item.isVisible())) {
-          continue;
-        }
-
-        const key = await getGeneratedImageKey(item);
-        if (!existingKeys.has(key)) {
-          return item;
-        }
-      } catch {
-        // ignore detached or transient nodes
-      }
+    const item = await findNewGeneratedImage(page, existingKeys);
+    if (item) {
+      return item;
     }
 
     await sleep(500);
   }
 
   throw new Error('等待生成图片超时');
+}
+
+async function findNewGeneratedImage(page, existingKeys = new Set()) {
+  const locator = page.locator(getGeneratedImageSelector());
+  const count = await locator.count().catch(() => 0);
+
+  for (let i = 0; i < count; i++) {
+    const item = locator.nth(i);
+    try {
+      if (!(await item.isVisible())) {
+        continue;
+      }
+
+      const key = await getGeneratedImageKey(item);
+      if (!existingKeys.has(key)) {
+        return item;
+      }
+    } catch {
+      // ignore detached or transient nodes
+    }
+  }
+
+  return null;
+}
+
+async function waitForAssistantError(page, timeout, existingKeys = new Set(), api = null) {
+  const locator = page.locator(getAssistantMessageSelector());
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    const count = await locator.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const item = locator.nth(i);
+      try {
+        const data = await getAssistantMessageData(item);
+        const text = data.text;
+        if (!text) {
+          continue;
+        }
+
+        if (existingKeys.has(data.key)) {
+          continue;
+        }
+
+        if (isAssistantErrorText(text)) {
+          api?.log('warn', '检测到 ChatGPT 错误回复', {
+            textPreview: text.slice(0, 200)
+          });
+          return text;
+        }
+      } catch {
+        // ignore detached nodes
+      }
+    }
+
+    await sleep(500);
+  }
+
+  throw new Error('等待错误回复超时');
+}
+
+async function waitForAssistantReply(page, timeout, existingKeys = new Set(), api = null) {
+  const locator = page.locator(getAssistantMessageSelector());
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    const count = await locator.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const item = locator.nth(i);
+      try {
+        const data = await getAssistantMessageData(item);
+        const text = data.text;
+        if (!text) {
+          continue;
+        }
+
+        if (existingKeys.has(data.key)) {
+          continue;
+        }
+
+        api?.log('info', '检测到新的 assistant 文本回复', {
+          textPreview: text.slice(0, 200)
+        });
+        return text;
+      } catch {
+        // ignore detached nodes
+      }
+    }
+
+    await sleep(500);
+  }
+
+  throw new Error('等待 assistant 文本回复超时');
+}
+
+async function hasImageGenerationInProgress(page) {
+  const loadingLocators = [
+    page.locator('[data-testid="image-gen-loading-state"]'),
+    page.locator('[data-testid="image-gen-loading-state-frame"]'),
+    page.locator('[data-testid="image-gen-loading-state-entry-surface"]'),
+    page.locator('[data-testid="stop-button"]'),
+    page.getByRole('button', { name: /停止回答/i }),
+    page.getByRole('button', { name: /Stop/i })
+  ];
+
+  for (const locator of loadingLocators) {
+    try {
+      if (await locator.first().isVisible()) {
+        return true;
+      }
+    } catch {
+      // ignore transient locators
+    }
+  }
+
+  return false;
+}
+
+async function waitForAssistantOutcome(page, timeout, existingAssistantTextKeys, existingImageKeys, api = null) {
+  const start = Date.now();
+  let candidateText = '';
+  let candidateSince = 0;
+
+  while (Date.now() - start < timeout) {
+    const imageLocator = await findNewGeneratedImage(page, existingImageKeys);
+    if (imageLocator) {
+      return { type: 'image', imageLocator };
+    }
+
+    const assistantText = await findNewAssistantText(page, existingAssistantTextKeys);
+    if (assistantText) {
+      if (isAssistantErrorText(assistantText)) {
+        api?.log('warn', '检测到 ChatGPT 错误回复', { textPreview: assistantText.slice(0, 200) });
+        return { type: 'error', text: assistantText };
+      }
+
+      const inProgress = await hasImageGenerationInProgress(page);
+      if (inProgress || isAssistantProgressText(assistantText)) {
+        api?.log('info', '检测到图片处理中状态，继续等待', {
+          textPreview: assistantText.slice(0, 120)
+        });
+        candidateText = '';
+        candidateSince = 0;
+        await sleep(500);
+        continue;
+      }
+
+      if (assistantText !== candidateText) {
+        candidateText = assistantText;
+        candidateSince = Date.now();
+        api?.log('info', '检测到新的 assistant 文本回复，开始观察是否会继续出图', {
+          textPreview: assistantText.slice(0, 200)
+        });
+      }
+
+      if (Date.now() - candidateSince >= 15000) {
+        return { type: 'text', text: candidateText };
+      }
+    }
+
+    await sleep(500);
+  }
+
+  throw new Error('等待生成结果超时');
+}
+
+async function findNewAssistantText(page, existingKeys = new Set()) {
+  const locator = page.locator(getAssistantMessageSelector());
+  const count = await locator.count().catch(() => 0);
+
+  for (let i = 0; i < count; i++) {
+    const item = locator.nth(i);
+    try {
+      const data = await getAssistantMessageData(item);
+      const text = data.text;
+      if (!text) {
+        continue;
+      }
+
+      if (existingKeys.has(data.key)) {
+        continue;
+      }
+
+      return text;
+    } catch {
+      // ignore detached nodes
+    }
+  }
+
+  return '';
 }
 
 async function extractImageFile(api, page, imageLocator) {
@@ -380,41 +646,48 @@ async function submitPrompt(page, api) {
   await waitForUploadTilesSettled(page, 0, 30000).catch(() => {});
 
   const maxAttempts = 3;
-  const submitTimeout = 15000;
+  const submitTimeout = 8000;
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const sendButton = await waitForSendReady(page, 30000);
+  async function trySubmitByEnter(actionName) {
     const submissionPromise = page.waitForResponse((response) => {
       return response.url().includes('backend-api/f/conversation') && response.request().method() === 'POST';
     }, { timeout: submitTimeout });
 
-    const clicked = await clickFirstAvailable([sendButton], { timeout: 5000 });
-    if (!clicked) {
-      await page.keyboard.press('Enter');
-    }
+    const composer = await waitForComposer(page, 5000);
+    await composer.click({ timeout: 5000 });
+    await page.keyboard.press('Enter');
 
     try {
       await submissionPromise;
-      api.log('info', '已确认提交请求已发出', { attempt });
-      return;
+      api.log('info', '已确认提交请求已发出', { actionName });
+      return true;
     } catch (error) {
-      api.log('warn', '发送后未检测到提交请求，准备重试', {
-        attempt,
+      api.log('warn', '提交动作未触发请求', {
+        actionName,
         error: error.message
       });
-
-      if (attempt === maxAttempts) {
-        throw new Error('发送提示词后未检测到提交请求');
-      }
-
-      try {
-        const composer = await waitForComposer(page, 5000);
-        await composer.click({ timeout: 5000 });
-      } catch {
-        // ignore focus recovery failures before retry
-      }
-      await sleep(1000);
+      return false;
     }
+  }
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    await waitForSendReady(page, 30000);
+    let submitted = false;
+
+    submitted = await trySubmitByEnter('keyboard.enter');
+
+    if (submitted) {
+      api.log('info', '已确认提交请求已发出', { attempt });
+      return;
+    }
+
+    api.log('warn', '发送后未检测到提交请求，准备重试', { attempt });
+
+    if (attempt === maxAttempts) {
+      throw new Error('发送提示词后未检测到提交请求');
+    }
+
+    await sleep(1000);
   }
 }
 
@@ -443,17 +716,22 @@ async function executeChatgptImage(ctx, input) {
     await waitForUploadTilesSettled(page, images.filter(image => image?.path).length, 60000, api);
   }
 
-  await composer.click({ timeout: 10000 });
-  await composer.fill('');
-  await composer.fill(prompt);
+  await setComposerPrompt(page, composer, prompt);
 
   const existingImageKeys = await collectExistingGeneratedImageKeys(page);
+  const existingAssistantTextKeys = await collectExistingAssistantTextKeys(page);
 
   const conversationPromise = page.waitForResponse((response) => {
     return response.url().includes('backend-api/f/conversation') && response.request().method() === 'POST';
   }, { timeout: waitTimeout });
 
-  const imagePromise = waitForGeneratedImage(page, Math.max(waitTimeout, 180000), existingImageKeys);
+  const assistantOutcomePromise = waitForAssistantOutcome(
+    page,
+    Math.max(waitTimeout, 180000),
+    existingAssistantTextKeys,
+    existingImageKeys,
+    api
+  );
 
   await submitPrompt(page, api);
 
@@ -499,7 +777,29 @@ async function executeChatgptImage(ctx, input) {
   }
 
   try {
-    const imageLocator = await imagePromise;
+    const result = await assistantOutcomePromise;
+
+    if (result.type === 'error') {
+      return {
+        success: false,
+        error: {
+          message: result.text.substring(0, 200),
+          retryable: false
+        }
+      };
+    }
+
+    if (result.type === 'text') {
+      return {
+        success: false,
+        error: {
+          message: result.text.substring(0, 200),
+          retryable: false
+        }
+      };
+    }
+
+    const imageLocator = result.imageLocator;
     api.log('info', '检测到已生成图片，优先直接下载图片源');
 
     let file;

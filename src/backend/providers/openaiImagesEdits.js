@@ -82,6 +82,19 @@ function buildSchema(manifest) {
     };
 }
 
+function resolveResponseFormat(body) {
+    const legacyValue = body.response_format || body.responseFormat;
+    if (legacyValue !== undefined && legacyValue !== null && legacyValue !== '') {
+        return normalizeResponseFormat(legacyValue);
+    }
+
+    if (body.output_format === 'url' || body.output_format === 'b64_json') {
+        return normalizeResponseFormat(body.output_format);
+    }
+
+    return normalizeResponseFormat(undefined);
+}
+
 async function normalizeEditInput(body, context, manifest) {
     const prompt = normalizeStringField(body.prompt, { fieldName: 'prompt', required: true });
     const { uploads, cleanupPaths } = await normalizeInputImages(body.images || body.image, context);
@@ -90,6 +103,7 @@ async function normalizeEditInput(body, context, manifest) {
     }
     const mask = await normalizeMask(body.mask, context);
     const modelId = pickDefaultModel(manifest, body.model);
+    const size = body.size ? String(body.size) : '1024x1024';
     return {
         modelId,
         input: {
@@ -97,14 +111,17 @@ async function normalizeEditInput(body, context, manifest) {
             prompt,
             images: uploads,
             mask: mask.upload,
-            size: body.size ? String(body.size) : '',
+            size,
             n: normalizeIntegerField(body.n, { fieldName: 'n', defaultValue: 1, min: 1, max: 10 }),
-            responseFormat: normalizeResponseFormat(body.response_format || body.responseFormat),
+            responseFormat: resolveResponseFormat(body),
             quality: body.quality ? String(body.quality) : '',
             background: body.background ? String(body.background) : '',
             moderation: body.moderation ? String(body.moderation) : '',
-            outputFormat: body.output_format ? String(body.output_format) : '',
-            outputCompression: body.output_compression ?? null
+            outputFormat: body.output_format && !['url', 'b64_json'].includes(String(body.output_format))
+                ? String(body.output_format)
+                : '',
+            outputCompression: body.output_compression ?? null,
+            user: body.user ? String(body.user) : ''
         },
         cleanupPaths: [...cleanupPaths, ...mask.cleanupPaths],
         promptText: prompt,
