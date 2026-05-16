@@ -1,16 +1,11 @@
-const TARGET_URL = 'https://chatgpt.com/images/';
-const INPUT_SELECTOR = '.ProseMirror';
+const TARGET_URL = 'https://chatgpt.com/';
 
-async function sleep(ms) {
-  await new Promise(resolve => setTimeout(resolve, ms));
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function waitForComposer(page, timeout = 30000) {
-  await page.waitForSelector(INPUT_SELECTOR, { timeout });
-}
-
-async function clickFirstAvailable(locatorCandidates, options = {}) {
-  for (const locator of locatorCandidates) {
+async function clickFirstAvailable(locators, options = {}) {
+  for (const locator of locators) {
     try {
       await locator.click(options);
       return true;
@@ -21,34 +16,41 @@ async function clickFirstAvailable(locatorCandidates, options = {}) {
   return false;
 }
 
-function createDownloadWatcher(page, api, timeout) {
-  let resolvedFileName = null;
-  let resolvedDownloadUrl = null;
+async function getComposer(page, timeout = 30000) {
+  const locators = [
+    page.locator('#prompt-textarea'),
+    page.locator('.ProseMirror'),
+    page.getByRole('textbox')
+  ];
 
-  const promise = page.waitForResponse(async (response) => {
-    const url = response.url();
-    if (!url.includes('backend-api/files/download/file_') || response.status() !== 200) {
-      return false;
-    }
-
+  for (const locator of locators) {
     try {
-      const json = await response.json();
-      const fileName = json?.file_name;
-      const downloadUrl = json?.download_url;
-      if (fileName && !fileName.includes('.part') && downloadUrl) {
-        resolvedFileName = fileName;
-        resolvedDownloadUrl = downloadUrl;
-        api.log('info', '图片生成完成', { fileName });
-        return true;
-      }
+      await locator.first().waitFor({ timeout, state: 'visible' });
+      return locator.first();
     } catch {
-      // ignore
+      // try next locator
     }
+  }
 
-    return false;
-  }, { timeout }).then(() => ({ fileName: resolvedFileName, downloadUrl: resolvedDownloadUrl }));
+  throw new Error('未找到 ChatGPT 输入框');
+}
 
-  return promise;
+async function startNewChatIfPossible(page) {
+  await clickFirstAvailable([
+    page.getByRole('button', { name: /新聊天/i }),
+    page.getByRole('button', { name: /New chat/i }),
+    page.locator("[data-testid='create-new-chat-button']")
+  ], { timeout: 5000 });
+}
+
+async function enableImageMode(page) {
+  const enabled = await clickFirstAvailable([
+    page.getByText('生成图片', { exact: false }),
+    page.getByText('Create image', { exact: false }),
+    page.locator("[data-testid='use-case-prompt-chips'] button").first()
+  ], { timeout: 5000 });
+
+  return enabled;
 }
 
 async function uploadFiles(page, images) {
@@ -60,7 +62,9 @@ async function uploadFiles(page, images) {
   const buttonCandidates = [
     page.getByRole('button', { name: /Add files and more/i }),
     page.getByRole('button', { name: /Add photos and files/i }),
-    page.getByRole('button', { name: /Add files/i })
+    page.getByRole('button', { name: /Add files/i }),
+    page.getByRole('button', { name: /添加文件/i }),
+    page.getByRole('button', { name: /添加图片/i })
   ];
 
   for (const button of buttonCandidates) {
@@ -85,30 +89,15 @@ async function uploadFiles(page, images) {
   throw new Error('未找到可用的图片上传入口');
 }
 
-async function downloadImage(api, page, url, timeout = 120000) {
-  const resp = await page.request.get(url, { timeout });
-  if (!resp.ok()) {
-    throw new Error(`图片下载失败: HTTP ${resp.status()}`);
-  }
-
-  const buffer = await resp.body();
-  const contentType = resp.headers()['content-type'] || 'image/png';
-  const mimeType = contentType.split(';')[0].trim();
-
-  return await api.saveFile({
-    relativePath: 'chatgpt/result.png',
-    content: buffer,
-    mimeType
-  });
-}
-
 function extractConversationText(conversationBody) {
   let text = '';
   const lines = conversationBody.split('\n');
+
   for (const line of lines) {
     if (!line.startsWith('data: ')) continue;
     const dataStr = line.slice(6).trim();
     if (!dataStr || dataStr === '[DONE]') continue;
+
     try {
       const data = JSON.parse(dataStr);
       if (
@@ -121,6 +110,7 @@ function extractConversationText(conversationBody) {
           text = part;
         }
       }
+
       if (Array.isArray(data.v)) {
         for (const patch of data.v) {
           if (patch.o === 'append' && patch.p === '/message/content/parts/0' && patch.v) {
@@ -129,9 +119,10 @@ function extractConversationText(conversationBody) {
         }
       }
     } catch {
-      // ignore line parse failures
+      // ignore parse failures
     }
   }
+
   return text;
 }
 
@@ -142,13 +133,82 @@ function buildPrompt(input) {
   return `${prompt}\n\n将宽高比设置为 ${size}`;
 }
 
+async function waitForGeneratedImage(page, timeout) {
+  const candidates = [
+    page.getByRole('img', { name: /已生成图片/i }),
+    page.getByRole('img', { name: /Generated image/i }),
+    page.locator('img[alt*="已生成图片"]'),
+    page.locator('img[alt*="Generated image"]')
+  ];
+
+  for (const locator of candidates) {
+    try {
+      await locator.last().waitFor({ timeout, state: 'visible' });
+      return locator.last();
+    } catch {
+      // try next locator
+    }
+  }
+
+  throw new Error('等待生成图片超时');
+}
+
+async function extractImageData(api, page, imageLocator) {
+  const source = await imageLocator.evaluate((img) => {
+    return img.currentSrc || img.src || img.getAttribute('src') || '';
+  });
+
+  if (!source) {
+    throw new Error('未获取到图片地址');
+  }
+
+  if (source.startsWith('data:')) {
+    return await api.saveFile({
+      relativePath: 'chatgpt/result.png',
+      content: source
+    });
+  }
+
+  if (source.startsWith('blob:')) {
+    const dataUrl = await page.evaluate(async (blobUrl) => {
+      const response = await fetch(blobUrl);
+      const blob = await response.blob();
+      return await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }, source);
+
+    return await api.saveFile({
+      relativePath: 'chatgpt/result.png',
+      content: dataUrl
+    });
+  }
+
+  const resp = await page.request.get(source, { timeout: 120000 });
+  if (!resp.ok()) {
+    throw new Error(`图片下载失败: HTTP ${resp.status()}`);
+  }
+
+  const buffer = await resp.body();
+  const contentType = resp.headers()['content-type'] || 'image/png';
+  const mimeType = contentType.split(';')[0].trim();
+  return await api.saveFile({
+    relativePath: 'chatgpt/result.png',
+    content: buffer,
+    mimeType
+  });
+}
+
 async function executeChatgptImage(ctx, input) {
   const { page, api, config } = ctx;
   const waitTimeout = config?.backend?.pool?.waitTimeout ?? 120000;
   const prompt = buildPrompt(input);
   const images = input.images || [];
 
-  api.log('info', '打开 ChatGPT 图片页面', {
+  api.log('info', '打开 ChatGPT 页面', {
     providerType: input.providerType,
     model: input.model,
     promptLength: prompt.length,
@@ -156,60 +216,54 @@ async function executeChatgptImage(ctx, input) {
   });
 
   await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await waitForComposer(page);
-  await sleep(500);
+  await sleep(1000);
+  await startNewChatIfPossible(page);
+  const composer = await getComposer(page, 30000);
 
   if (images.length > 0) {
     api.log('info', '开始上传参考图片', { count: images.length });
     await uploadFiles(page, images);
-    await sleep(3000);
+    await sleep(2000);
   }
 
-  const composer = page.locator(INPUT_SELECTOR).first();
   await composer.click({ timeout: 10000 });
+  await composer.fill('');
   await page.keyboard.insertText(prompt);
 
-  const imageTimeout = Math.max(waitTimeout, 120000);
-  api.log('info', '等待图片下载链接', {
-    providerType: input.providerType,
-    imageTimeout
-  });
-  const downloadWatcher = createDownloadWatcher(page, api, imageTimeout);
+  const imageModeEnabled = await enableImageMode(page);
+  api.log('info', '切换生成图片模式', { enabled: imageModeEnabled });
 
   const conversationPromise = page.waitForResponse((response) => {
     return response.url().includes('backend-api/f/conversation') && response.request().method() === 'POST';
   }, { timeout: waitTimeout });
+  const imagePromise = waitForGeneratedImage(page, Math.max(waitTimeout, 180000));
 
   api.log('info', '发送提示词', { providerType: input.providerType });
   const clicked = await clickFirstAvailable([
+    page.getByRole('button', { name: /^发送提示$/i }),
     page.getByRole('button', { name: /^Send prompt$/i }),
     page.getByRole('button', { name: /^Send message$/i }),
-    page.locator('button[data-testid="send-button"]')
+    page.locator("[data-testid='send-button']")
   ], { timeout: 5000 });
   if (!clicked) {
     await page.keyboard.press('Enter');
   }
 
-  const conversationResponse = await conversationPromise;
-
-  if (conversationResponse.status() !== 200) {
-    return {
-      success: false,
-      error: {
-        message: `API 返回错误: HTTP ${conversationResponse.status()}`,
-        retryable: true
-      }
-    };
-  }
-
-  const conversationBody = await conversationResponse.text();
-  const conversationText = extractConversationText(conversationBody);
-  const isImageGenerationStarted = conversationBody.includes('dalle') || conversationBody.includes('file_');
-
-  if (conversationText) {
-    const isRateLimit = conversationBody.includes('RateLimitException') ||
-      conversationBody.includes('rate limit') ||
-      /limit.*reset/i.test(conversationText);
+  let conversationText = '';
+  try {
+    const conversationResponse = await conversationPromise;
+    if (conversationResponse.status() !== 200) {
+      return {
+        success: false,
+        error: {
+          message: `API 返回错误: HTTP ${conversationResponse.status()}`,
+          retryable: true
+        }
+      };
+    }
+    const body = await conversationResponse.text();
+    conversationText = extractConversationText(body);
+    const isRateLimit = body.includes('RateLimitException') || body.includes('rate limit') || /limit.*reset/i.test(conversationText);
     if (isRateLimit) {
       return {
         success: false,
@@ -219,40 +273,14 @@ async function executeChatgptImage(ctx, input) {
         }
       };
     }
-
-    if (!isImageGenerationStarted) {
-      const isContentRejection = /cannot|can't|unable|sorry|policy|violat/i.test(conversationText);
-      if (isContentRejection) {
-        return {
-          success: false,
-          error: {
-            message: `内容被拒绝: ${conversationText.substring(0, 200)}`,
-            retryable: false
-          }
-        };
-      }
-    }
+  } catch {
+    // keep waiting image if conversation parsing failed
   }
 
   try {
-    const { fileName, downloadUrl } = await downloadWatcher;
-
-    if (!downloadUrl) {
-      return {
-        success: false,
-        error: {
-          message: '未获取到图片下载链接',
-          retryable: true
-        }
-      };
-    }
-
-    api.log('info', '开始下载图片', {
-      downloadUrl,
-      fileName,
-      isImageGenerationStarted
-    });
-    const file = await downloadImage(api, page, downloadUrl);
+    const imageLocator = await imagePromise;
+    api.log('info', '检测到已生成图片，开始提取源地址');
+    const file = await extractImageData(api, page, imageLocator);
     return {
       success: true,
       data: {
@@ -274,6 +302,7 @@ async function executeChatgptImage(ctx, input) {
         }
       };
     }
+
     return {
       success: false,
       error: {
