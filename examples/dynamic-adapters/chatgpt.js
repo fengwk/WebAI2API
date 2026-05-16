@@ -378,11 +378,43 @@ async function downloadImageViaViewer(api, page, imageLocator) {
 async function submitPrompt(page, api) {
   api.log('info', '发送提示词');
   await waitForUploadTilesSettled(page, 0, 30000).catch(() => {});
-  const sendButton = await waitForSendReady(page, 30000);
-  const clicked = await clickFirstAvailable([sendButton], { timeout: 5000 });
 
-  if (!clicked) {
-    await page.keyboard.press('Enter');
+  const maxAttempts = 3;
+  const submitTimeout = 15000;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const sendButton = await waitForSendReady(page, 30000);
+    const submissionPromise = page.waitForResponse((response) => {
+      return response.url().includes('backend-api/f/conversation') && response.request().method() === 'POST';
+    }, { timeout: submitTimeout });
+
+    const clicked = await clickFirstAvailable([sendButton], { timeout: 5000 });
+    if (!clicked) {
+      await page.keyboard.press('Enter');
+    }
+
+    try {
+      await submissionPromise;
+      api.log('info', '已确认提交请求已发出', { attempt });
+      return;
+    } catch (error) {
+      api.log('warn', '发送后未检测到提交请求，准备重试', {
+        attempt,
+        error: error.message
+      });
+
+      if (attempt === maxAttempts) {
+        throw new Error('发送提示词后未检测到提交请求');
+      }
+
+      try {
+        const composer = await waitForComposer(page, 5000);
+        await composer.click({ timeout: 5000 });
+      } catch {
+        // ignore focus recovery failures before retry
+      }
+      await sleep(1000);
+    }
   }
 }
 
