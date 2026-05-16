@@ -13,7 +13,8 @@ const formData = reactive({
     logLevel: 'info',
     queueBuffer: 2,
     imageLimit: 5,
-    imageMarkdown: false
+    imageMarkdown: false,
+    publicFileBaseUrl: ''
 });
 
 onMounted(async () => {
@@ -107,6 +108,18 @@ const handleSave = async () => {
                             <a-select-option value="warn">Warn - 警告信息</a-select-option>
                             <a-select-option value="error">Error - 仅错误</a-select-option>
                         </a-select>
+                    </div>
+                </a-col>
+
+                <!-- 外部文件访问基准 URL -->
+                <a-col :xs="24" :md="12">
+                    <div style="margin-bottom: 8px;">
+                        <div style="font-weight: 600; margin-bottom: 4px;">图片 URL 基准地址</div>
+                        <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
+                            当图片接口返回 url 时，用它拼接外部可访问地址。<br>
+                            例如: https://gpt-load.kk1.fun/proxy/gpt-image
+                        </div>
+                        <a-input v-model:value="formData.publicFileBaseUrl" placeholder="留空则返回 /files/... 相对路径" />
                     </div>
                 </a-col>
             </a-row>

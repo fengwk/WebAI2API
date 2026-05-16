@@ -73,6 +73,19 @@ test('image generations provider accepts output_format as response alias', async
     assert.equal(result.input.size, '1024x1024');
 });
 
+test('image generations provider defaults to b64_json response format', async () => {
+    const manifest = {
+        models: ['gpt-image-2']
+    };
+
+    const result = await openaiImagesGenerationsProvider.normalizeApiRequest({
+        model: 'gpt-image-2',
+        prompt: 'cat'
+    }, {}, manifest);
+
+    assert.equal(result.input.responseFormat, 'b64_json');
+});
+
 test('image edits provider normalizes base64 uploads', async () => {
     const tempDir = await createTempDir('webai-edit-');
     const manifest = {
@@ -113,4 +126,21 @@ test('image edits provider accepts output_format as response alias', async () =>
     assert.equal(result.input.responseFormat, 'url');
     assert.equal(result.input.outputFormat, '');
     assert.equal(result.input.size, '1024x1024');
+});
+
+test('image edits provider defaults to b64_json response format', async () => {
+    const tempDir = await createTempDir('webai-edit-');
+    const manifest = {
+        models: ['gpt-image-2']
+    };
+    const dataUrl = 'data:image/png;base64,' + Buffer.from('edit-image').toString('base64');
+
+    const result = await openaiImagesEditsProvider.normalizeAdminInput({
+        input: {
+            prompt: 'edit this',
+            images: [{ fileName: 'image.png', mimeType: 'image/png', dataUrl }]
+        }
+    }, { tempDir, requestId: 'edit-default-format-test' }, manifest);
+
+    assert.equal(result.input.responseFormat, 'b64_json');
 });

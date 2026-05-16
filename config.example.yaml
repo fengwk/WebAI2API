@@ -15,6 +15,11 @@ server:
     mode: "comment"
   # 图片生成结果返回 Markdown 格式
   imageMarkdown: false
+  # 当图片接口返回 url 时，拼接外部可访问地址的基准 URL。
+  # 例如部署在反代前缀 /proxy/gpt-image 下时，可配置为：
+  # https://gpt-load.kk1.fun/proxy/gpt-image
+  # 留空时返回站内相对路径 /files/...
+  publicFileBaseUrl: ""
 
 backend:
   # ========================================

@@ -73,6 +73,14 @@ export function createQueueManager(queueConfig, callbacks) {
     /** @type {PoolContext|null} */
     let poolContext = null;
 
+    function buildPublicBaseUrl() {
+        const configured = String(config.server?.publicFileBaseUrl || '').trim();
+        if (!configured) {
+            return '';
+        }
+        return configured.replace(/\/$/, '');
+    }
+
     /**
      * 清理任务临时文件
      * @param {TaskContext} task - 任务上下文
@@ -134,9 +142,11 @@ export function createQueueManager(queueConfig, callbacks) {
                 poolContext = await initBrowser(config);
             }
 
+            const publicBaseUrl = buildPublicBaseUrl();
+            const publicResponsePath = `/files/responses/${encodeURIComponent(id)}`;
             const fileOutput = {
                 rootDir: path.join(process.cwd(), 'data', 'files', 'responses', id),
-                urlBasePath: `/files/responses/${encodeURIComponent(id)}`
+                urlBasePath: publicBaseUrl ? `${publicBaseUrl}${publicResponsePath}` : publicResponsePath
             };
 
             const result = await executeTask(poolContext, {

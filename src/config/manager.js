@@ -48,7 +48,8 @@ export function getServerConfig() {
         authToken: config.server?.auth || '',
         keepaliveMode: config.server?.keepalive?.mode || 'comment',
         logLevel: config.logLevel || 'info',
-        imageMarkdown: config.server?.imageMarkdown || false
+        imageMarkdown: config.server?.imageMarkdown || false,
+        publicFileBaseUrl: config.server?.publicFileBaseUrl || ''
     };
 }
 
@@ -69,6 +70,7 @@ export function saveServerConfig(data) {
     }
     if (data.logLevel !== undefined) config.logLevel = data.logLevel;
     if (data.imageMarkdown !== undefined) config.server.imageMarkdown = data.imageMarkdown;
+    if (data.publicFileBaseUrl !== undefined) config.server.publicFileBaseUrl = data.publicFileBaseUrl;
 
     writeConfig(config);
 }

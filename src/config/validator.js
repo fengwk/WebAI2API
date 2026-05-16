@@ -69,6 +69,14 @@ export function validateServerConfig(data) {
         errors.push('imageMarkdown 必须是布尔值');
     }
 
+    if (data.publicFileBaseUrl !== undefined) {
+        if (typeof data.publicFileBaseUrl !== 'string') {
+            errors.push('publicFileBaseUrl 必须是字符串');
+        } else if (data.publicFileBaseUrl && !/^https?:\/\//i.test(data.publicFileBaseUrl)) {
+            errors.push('publicFileBaseUrl 必须以 http:// 或 https:// 开头，或留空');
+        }
+    }
+
     return { valid: errors.length === 0, errors };
 }
 

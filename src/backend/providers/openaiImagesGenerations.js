@@ -29,7 +29,7 @@ function buildSchema(manifest) {
                 key: 'response_format',
                 label: 'Response Format',
                 type: 'select',
-                defaultValue: 'url',
+                defaultValue: 'b64_json',
                 options: [
                     { label: 'url', value: 'url' },
                     { label: 'b64_json', value: 'b64_json' }
@@ -49,7 +49,7 @@ function resolveResponseFormat(body) {
         return normalizeResponseFormat(body.output_format);
     }
 
-    return normalizeResponseFormat(undefined);
+    return 'b64_json';
 }
 
 function normalizeImageInput(body, manifest) {
