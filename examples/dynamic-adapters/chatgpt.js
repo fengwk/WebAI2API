@@ -21,6 +21,36 @@ async function clickFirstAvailable(locatorCandidates, options = {}) {
   return false;
 }
 
+function createDownloadWatcher(page, api, timeout) {
+  let resolvedFileName = null;
+  let resolvedDownloadUrl = null;
+
+  const promise = page.waitForResponse(async (response) => {
+    const url = response.url();
+    if (!url.includes('backend-api/files/download/file_') || response.status() !== 200) {
+      return false;
+    }
+
+    try {
+      const json = await response.json();
+      const fileName = json?.file_name;
+      const downloadUrl = json?.download_url;
+      if (fileName && !fileName.includes('.part') && downloadUrl) {
+        resolvedFileName = fileName;
+        resolvedDownloadUrl = downloadUrl;
+        api.log('info', '图片生成完成', { fileName });
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+
+    return false;
+  }, { timeout }).then(() => ({ fileName: resolvedFileName, downloadUrl: resolvedDownloadUrl }));
+
+  return promise;
+}
+
 async function uploadFiles(page, images) {
   if (!images?.length) return;
 
@@ -139,6 +169,17 @@ async function executeChatgptImage(ctx, input) {
   await composer.click({ timeout: 10000 });
   await page.keyboard.insertText(prompt);
 
+  const imageTimeout = Math.max(waitTimeout, 120000);
+  api.log('info', '等待图片下载链接', {
+    providerType: input.providerType,
+    imageTimeout
+  });
+  const downloadWatcher = createDownloadWatcher(page, api, imageTimeout);
+
+  const conversationPromise = page.waitForResponse((response) => {
+    return response.url().includes('backend-api/f/conversation') && response.request().method() === 'POST';
+  }, { timeout: waitTimeout });
+
   api.log('info', '发送提示词', { providerType: input.providerType });
   const clicked = await clickFirstAvailable([
     page.getByRole('button', { name: /^Send prompt$/i }),
@@ -149,9 +190,7 @@ async function executeChatgptImage(ctx, input) {
     await page.keyboard.press('Enter');
   }
 
-  const conversationResponse = await page.waitForResponse((response) => {
-    return response.url().includes('backend-api/f/conversation') && response.request().method() === 'POST';
-  }, { timeout: waitTimeout });
+  const conversationResponse = await conversationPromise;
 
   if (conversationResponse.status() !== 200) {
     return {
@@ -195,37 +234,36 @@ async function executeChatgptImage(ctx, input) {
     }
   }
 
-  const imageTimeout = Math.max(waitTimeout, 120000);
-  let downloadUrl = null;
-  let fileName = null;
-
   try {
-    api.log('info', '等待图片下载链接', {
-      providerType: input.providerType,
-      imageTimeout,
+    const { fileName, downloadUrl } = await downloadWatcher;
+
+    if (!downloadUrl) {
+      return {
+        success: false,
+        error: {
+          message: '未获取到图片下载链接',
+          retryable: true
+        }
+      };
+    }
+
+    api.log('info', '开始下载图片', {
+      downloadUrl,
+      fileName,
       isImageGenerationStarted
     });
-
-    await page.waitForResponse(async (response) => {
-      const url = response.url();
-      if (!url.includes('backend-api/files/download/file_') || response.status() !== 200) {
-        return false;
+    const file = await downloadImage(api, page, downloadUrl);
+    return {
+      success: true,
+      data: {
+        created: Math.floor(Date.now() / 1000),
+        images: [
+          {
+            file
+          }
+        ]
       }
-      try {
-        const json = await response.json();
-        const fn = json?.file_name;
-        const dl = json?.download_url;
-        if (fn && !fn.includes('.part') && dl) {
-          fileName = fn;
-          downloadUrl = json.download_url;
-          api.log('info', '图片生成完成', { fileName: fn });
-          return true;
-        }
-      } catch {
-        // ignore
-      }
-      return false;
-    }, { timeout: imageTimeout });
+    };
   } catch {
     if (conversationText) {
       return {
@@ -244,30 +282,6 @@ async function executeChatgptImage(ctx, input) {
       }
     };
   }
-
-  if (!downloadUrl) {
-    return {
-      success: false,
-      error: {
-        message: '未获取到图片下载链接',
-        retryable: true
-      }
-    };
-  }
-
-  api.log('info', '开始下载图片', { downloadUrl, fileName });
-  const file = await downloadImage(api, page, downloadUrl);
-  return {
-    success: true,
-    data: {
-      created: Math.floor(Date.now() / 1000),
-      images: [
-        {
-          file
-        }
-      ]
-    }
-  };
 }
 
 export const manifest = {

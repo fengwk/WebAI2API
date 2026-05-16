@@ -144,9 +144,16 @@ export class PoolManager {
         }
 
         const sortedCandidates = this.strategySelector.sort(candidates);
+        const failoverConfig = this.config.backend?.pool?.failover || {};
+        const failoverEnabled = failoverConfig.enabled !== false;
+        const maxRetries = failoverConfig.maxRetries ?? 2;
+        const maxAttempts = failoverEnabled
+            ? (maxRetries === 0 ? sortedCandidates.length : Math.min(maxRetries + 1, sortedCandidates.length))
+            : 1;
+
         let lastError = null;
 
-        for (let i = 0; i < sortedCandidates.length; i++) {
+        for (let i = 0; i < maxAttempts; i++) {
             const worker = sortedCandidates[i];
             logger.debug('工作池', `任务分发至: ${worker.name} (busy: ${worker.busyCount})`);
             try {
@@ -160,7 +167,7 @@ export class PoolManager {
                     return result;
                 }
 
-                if (i < sortedCandidates.length - 1) {
+                if (i < maxAttempts - 1) {
                     logger.warn('工作池', `[${worker.name}] 失败，尝试下一个 Worker...`, {
                         error: result.error?.message,
                         ...meta

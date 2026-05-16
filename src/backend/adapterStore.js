@@ -6,22 +6,10 @@
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
-import crypto from 'crypto';
 import { pathToFileURL } from 'url';
 
 export const ADAPTERS_DIR = path.join(process.cwd(), 'data', 'adapters');
 export const ADAPTER_EXAMPLES_DIR = path.join(process.cwd(), 'examples', 'dynamic-adapters');
-
-const BUNDLED_ADAPTER_HASHES = {
-    'chatgpt.js': new Set([
-        '3f13d0e76dfe652e821b9c0669b178f568013e08ac424b5e5c71e2771aa6b222',
-        '7f4705e1a20f0e40a865ad4a5d55e518b4c03c1995738b083657ed363a2d8350'
-    ]),
-    'gemini.js': new Set([
-        '6cc35d1b9c3697ec62bc24011df6a9e567fab1777cbe9184dc816251e5984d2a',
-        'd54341c76ad526c3bf02b9ba3e10014d7b7581b0671db32b8e07618bade61357'
-    ])
-};
 
 const ADAPTER_ID_RE = /^[A-Za-z0-9._-]+$/;
 
@@ -30,17 +18,11 @@ export function ensureAdaptersDirSync() {
         fs.mkdirSync(ADAPTERS_DIR, { recursive: true });
     }
     seedDefaultAdaptersIfEmptySync();
-    refreshBundledAdaptersIfNeededSync();
 }
 
 export async function ensureAdaptersDir() {
     await fsp.mkdir(ADAPTERS_DIR, { recursive: true });
     await seedDefaultAdaptersIfEmpty();
-    await refreshBundledAdaptersIfNeeded();
-}
-
-function sha256(content) {
-    return crypto.createHash('sha256').update(content).digest('hex');
 }
 
 export function seedDefaultAdaptersIfEmptySync() {
@@ -76,44 +58,6 @@ export async function seedDefaultAdaptersIfEmpty() {
         }));
     } catch {
         // ignore seeding failures, registry will continue loading existing files only
-    }
-}
-
-export function refreshBundledAdaptersIfNeededSync() {
-    if (!fs.existsSync(ADAPTER_EXAMPLES_DIR)) {
-        return;
-    }
-
-    for (const [fileName, knownHashes] of Object.entries(BUNDLED_ADAPTER_HASHES)) {
-        const runtimePath = path.join(ADAPTERS_DIR, fileName);
-        const examplePath = path.join(ADAPTER_EXAMPLES_DIR, fileName);
-        if (!fs.existsSync(runtimePath) || !fs.existsSync(examplePath)) {
-            continue;
-        }
-
-        const currentContent = fs.readFileSync(runtimePath, 'utf8');
-        if (knownHashes.has(sha256(currentContent))) {
-            fs.copyFileSync(examplePath, runtimePath);
-        }
-    }
-}
-
-export async function refreshBundledAdaptersIfNeeded() {
-    try {
-        for (const [fileName, knownHashes] of Object.entries(BUNDLED_ADAPTER_HASHES)) {
-            const runtimePath = path.join(ADAPTERS_DIR, fileName);
-            const examplePath = path.join(ADAPTER_EXAMPLES_DIR, fileName);
-            try {
-                const currentContent = await fsp.readFile(runtimePath, 'utf8');
-                if (knownHashes.has(sha256(currentContent))) {
-                    await fsp.copyFile(examplePath, runtimePath);
-                }
-            } catch {
-                // ignore missing files or IO failures
-            }
-        }
-    } catch {
-        // ignore refresh failures
     }
 }
 
