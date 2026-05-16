@@ -1,3 +1,5 @@
+import fs from 'fs/promises';
+
 const TARGET_URL = 'https://chatgpt.com/';
 
 function sleep(ms) {
@@ -16,7 +18,7 @@ async function clickFirstAvailable(locators, options = {}) {
   return false;
 }
 
-async function getComposer(page, timeout = 30000) {
+async function waitForComposer(page, timeout = 30000) {
   const locators = [
     page.locator('#prompt-textarea'),
     page.locator('.ProseMirror'),
@@ -43,50 +45,47 @@ async function startNewChatIfPossible(page) {
   ], { timeout: 5000 });
 }
 
-async function enableImageMode(page) {
-  const enabled = await clickFirstAvailable([
-    page.getByText('生成图片', { exact: false }),
-    page.getByText('Create image', { exact: false }),
-    page.locator("[data-testid='use-case-prompt-chips'] button").first()
+async function openComposerMenu(page) {
+  const opened = await clickFirstAvailable([
+    page.getByRole('button', { name: /添加文件等/i }),
+    page.getByRole('button', { name: /Add files and more/i }),
+    page.locator("[data-testid='composer-plus-btn']")
   ], { timeout: 5000 });
 
+  if (!opened) {
+    throw new Error('未找到 ChatGPT 加号菜单按钮');
+  }
+}
+
+async function enableImageMode(page, api) {
+  await openComposerMenu(page);
+
+  const enabled = await clickFirstAvailable([
+    page.getByRole('menuitem', { name: /创建图片/i }),
+    page.getByRole('menuitem', { name: /Create image/i }),
+    page.getByText('创建图片', { exact: false }),
+    page.getByText('Create image', { exact: false }),
+    page.getByText('生成图片', { exact: false })
+  ], { timeout: 5000 });
+
+  api.log('info', '切换创建图片模式', { enabled });
   return enabled;
 }
 
-async function uploadFiles(page, images) {
+async function uploadFiles(page, images, api) {
   if (!images?.length) return;
 
-  const imagePaths = images.map(image => image.path).filter(Boolean);
-  if (imagePaths.length === 0) return;
+  for (const image of images) {
+    if (!image?.path) continue;
 
-  const buttonCandidates = [
-    page.getByRole('button', { name: /Add files and more/i }),
-    page.getByRole('button', { name: /Add photos and files/i }),
-    page.getByRole('button', { name: /Add files/i }),
-    page.getByRole('button', { name: /添加文件/i }),
-    page.getByRole('button', { name: /添加图片/i })
-  ];
+    api.log('info', '上传参考图片', { fileName: image.fileName || image.path });
+    await openComposerMenu(page);
 
-  for (const button of buttonCandidates) {
-    try {
-      const [chooser] = await Promise.all([
-        page.waitForEvent('filechooser', { timeout: 5000 }),
-        button.click({ timeout: 5000 })
-      ]);
-      await chooser.setFiles(imagePaths);
-      return;
-    } catch {
-      // try next button
-    }
+    const uploadInput = page.locator('#upload-files').first();
+    await uploadInput.waitFor({ timeout: 5000, state: 'attached' });
+    await uploadInput.setInputFiles(image.path);
+    await sleep(1500);
   }
-
-  const fileInput = page.locator('input[type="file"]').first();
-  if (await fileInput.count()) {
-    await fileInput.setInputFiles(imagePaths);
-    return;
-  }
-
-  throw new Error('未找到可用的图片上传入口');
 }
 
 function extractConversationText(conversationBody) {
@@ -153,7 +152,7 @@ async function waitForGeneratedImage(page, timeout) {
   throw new Error('等待生成图片超时');
 }
 
-async function extractImageData(api, page, imageLocator) {
+async function extractImageFile(api, page, imageLocator) {
   const source = await imageLocator.evaluate((img) => {
     return img.currentSrc || img.src || img.getAttribute('src') || '';
   });
@@ -187,19 +186,69 @@ async function extractImageData(api, page, imageLocator) {
     });
   }
 
-  const resp = await page.request.get(source, { timeout: 120000 });
-  if (!resp.ok()) {
-    throw new Error(`图片下载失败: HTTP ${resp.status()}`);
+  const response = await page.request.get(source, { timeout: 120000 });
+  if (!response.ok()) {
+    throw new Error(`图片下载失败: HTTP ${response.status()}`);
   }
 
-  const buffer = await resp.body();
-  const contentType = resp.headers()['content-type'] || 'image/png';
+  const buffer = await response.body();
+  const contentType = response.headers()['content-type'] || 'image/png';
   const mimeType = contentType.split(';')[0].trim();
   return await api.saveFile({
     relativePath: 'chatgpt/result.png',
     content: buffer,
     mimeType
   });
+}
+
+async function clickSaveButton(page) {
+  return await clickFirstAvailable([
+    page.getByRole('button', { name: /^保存$/i }),
+    page.getByRole('button', { name: /^Save$/i }),
+    page.locator("[data-testid='fullscreen-shell-header-content'] button").nth(3),
+    page.locator('#radix-_r_hh_ button').nth(3)
+  ], { timeout: 5000 });
+}
+
+async function downloadImageViaViewer(api, page, imageLocator) {
+  await imageLocator.click({ timeout: 10000 });
+  await sleep(800);
+
+  const downloadPromise = page.waitForEvent('download', { timeout: 20000 });
+  const clicked = await clickSaveButton(page);
+  if (!clicked) {
+    throw new Error('未找到保存按钮');
+  }
+
+  const download = await downloadPromise;
+  const downloadPath = await download.path();
+  if (!downloadPath) {
+    throw new Error('下载文件路径为空');
+  }
+
+  const buffer = await fs.readFile(downloadPath);
+  const fileName = download.suggestedFilename() || 'result.png';
+  const mimeType = fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') ? 'image/jpeg' : 'image/png';
+
+  return await api.saveFile({
+    relativePath: `chatgpt/${fileName}`,
+    content: buffer,
+    mimeType
+  });
+}
+
+async function submitPrompt(page, api) {
+  api.log('info', '发送提示词');
+  const clicked = await clickFirstAvailable([
+    page.getByRole('button', { name: /^发送提示$/i }),
+    page.getByRole('button', { name: /^Send prompt$/i }),
+    page.getByRole('button', { name: /^Send message$/i }),
+    page.locator("[data-testid='send-button']")
+  ], { timeout: 5000 });
+
+  if (!clicked) {
+    await page.keyboard.press('Enter');
+  }
 }
 
 async function executeChatgptImage(ctx, input) {
@@ -218,36 +267,25 @@ async function executeChatgptImage(ctx, input) {
   await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await sleep(1000);
   await startNewChatIfPossible(page);
-  const composer = await getComposer(page, 30000);
+  const composer = await waitForComposer(page, 30000);
+
+  await enableImageMode(page, api);
 
   if (images.length > 0) {
-    api.log('info', '开始上传参考图片', { count: images.length });
-    await uploadFiles(page, images);
-    await sleep(2000);
+    await uploadFiles(page, images, api);
   }
 
   await composer.click({ timeout: 10000 });
   await composer.fill('');
-  await page.keyboard.insertText(prompt);
-
-  const imageModeEnabled = await enableImageMode(page);
-  api.log('info', '切换生成图片模式', { enabled: imageModeEnabled });
+  await composer.fill(prompt);
 
   const conversationPromise = page.waitForResponse((response) => {
     return response.url().includes('backend-api/f/conversation') && response.request().method() === 'POST';
   }, { timeout: waitTimeout });
+
   const imagePromise = waitForGeneratedImage(page, Math.max(waitTimeout, 180000));
 
-  api.log('info', '发送提示词', { providerType: input.providerType });
-  const clicked = await clickFirstAvailable([
-    page.getByRole('button', { name: /^发送提示$/i }),
-    page.getByRole('button', { name: /^Send prompt$/i }),
-    page.getByRole('button', { name: /^Send message$/i }),
-    page.locator("[data-testid='send-button']")
-  ], { timeout: 5000 });
-  if (!clicked) {
-    await page.keyboard.press('Enter');
-  }
+  await submitPrompt(page, api);
 
   let conversationText = '';
   try {
@@ -261,8 +299,10 @@ async function executeChatgptImage(ctx, input) {
         }
       };
     }
+
     const body = await conversationResponse.text();
     conversationText = extractConversationText(body);
+
     const isRateLimit = body.includes('RateLimitException') || body.includes('rate limit') || /limit.*reset/i.test(conversationText);
     if (isRateLimit) {
       return {
@@ -273,14 +313,33 @@ async function executeChatgptImage(ctx, input) {
         }
       };
     }
+
+    const isContentRejection = /cannot|can't|unable|sorry|policy|violat/i.test(conversationText);
+    if (conversationText && isContentRejection && !body.includes('file_') && !body.includes('dalle')) {
+      return {
+        success: false,
+        error: {
+          message: `内容被拒绝: ${conversationText.substring(0, 200)}`,
+          retryable: false
+        }
+      };
+    }
   } catch {
-    // keep waiting image if conversation parsing failed
+    // keep waiting for generated image if conversation parsing failed
   }
 
   try {
     const imageLocator = await imagePromise;
-    api.log('info', '检测到已生成图片，开始提取源地址');
-    const file = await extractImageData(api, page, imageLocator);
+    api.log('info', '检测到已生成图片，尝试通过查看器保存');
+
+    let file;
+    try {
+      file = await downloadImageViaViewer(api, page, imageLocator);
+    } catch (viewerError) {
+      api.log('warn', '查看器保存失败，回退为直接提取图片源', { error: viewerError.message });
+      file = await extractImageFile(api, page, imageLocator);
+    }
+
     return {
       success: true,
       data: {
