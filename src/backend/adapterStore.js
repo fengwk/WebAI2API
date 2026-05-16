@@ -14,10 +14,12 @@ export const ADAPTER_EXAMPLES_DIR = path.join(process.cwd(), 'examples', 'dynami
 
 const BUNDLED_ADAPTER_HASHES = {
     'chatgpt.js': new Set([
-        '3f13d0e76dfe652e821b9c0669b178f568013e08ac424b5e5c71e2771aa6b222'
+        '3f13d0e76dfe652e821b9c0669b178f568013e08ac424b5e5c71e2771aa6b222',
+        '7f4705e1a20f0e40a865ad4a5d55e518b4c03c1995738b083657ed363a2d8350'
     ]),
     'gemini.js': new Set([
-        '6cc35d1b9c3697ec62bc24011df6a9e567fab1777cbe9184dc816251e5984d2a'
+        '6cc35d1b9c3697ec62bc24011df6a9e567fab1777cbe9184dc816251e5984d2a',
+        'd54341c76ad526c3bf02b9ba3e10014d7b7581b0671db32b8e07618bade61357'
     ])
 };
 
