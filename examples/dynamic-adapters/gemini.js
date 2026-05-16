@@ -96,6 +96,26 @@ function parseLenFramedResponse(buf) {
   return frames;
 }
 
+function extractPayloads(frames) {
+  const payloads = [];
+  for (const frame of frames) {
+    if (!Array.isArray(frame)) continue;
+
+    for (const item of frame) {
+      if (!Array.isArray(item)) continue;
+      const payloadStr = item[2];
+      if (typeof payloadStr !== 'string') continue;
+
+      try {
+        payloads.push(JSON.parse(payloadStr));
+      } catch {
+        // ignore malformed payloads
+      }
+    }
+  }
+  return payloads;
+}
+
 function walk(obj, visit) {
   if (obj == null) return;
   if (Array.isArray(obj)) {
@@ -110,20 +130,21 @@ function walk(obj, visit) {
 
 function extractImageUrlsFromResponse(buf) {
   const frames = parseLenFramedResponse(buf);
+  const payloads = extractPayloads(frames);
   const urls = [];
   const seen = new Set();
   const pushUrl = (u) => {
     if (typeof u !== 'string') return;
     if (!/^https?:\/\//.test(u)) return;
-    if (!/googleusercontent\.com|gstatic\.com|googleapis\.com/i.test(u)) return;
+    if (!/googleusercontent\.com\/gg-dl|googleusercontent\.com\/rd-gg-dl|gstatic\.com|googleapis\.com/i.test(u)) return;
     if (!seen.has(u)) {
       seen.add(u);
       urls.push(u);
     }
   };
 
-  for (const frame of frames) {
-    walk(frame, (node) => {
+  for (const payload of payloads) {
+    walk(payload, (node) => {
       for (const [key, value] of Object.entries(node)) {
         if (typeof value === 'string') {
           if (/image|thumbnail|uri|url/i.test(key)) pushUrl(value);
@@ -138,17 +159,22 @@ function extractImageUrlsFromResponse(buf) {
 }
 
 function extractAiTextFromResponse(buf) {
-  try {
-    const text = buf.toString('utf8');
-    const matches = text.match(/"([^"\\]*(?:\\.[^"\\]*)*)"/g) || [];
-    const candidates = matches
-      .map(item => item.slice(1, -1))
-      .map(item => item.replace(/\\n/g, ' ').replace(/\\"/g, '"'))
-      .filter(item => /sorry|unable|can'?t|cannot|policy|violat|rate limit/i.test(item));
-    return candidates[0] || '';
-  } catch {
-    return '';
+  const frames = parseLenFramedResponse(buf);
+  const payloads = extractPayloads(frames);
+
+  let best = '';
+  for (const payload of payloads) {
+    walk(payload, (node) => {
+      for (const value of Object.values(node)) {
+        if (typeof value === 'string' && value.length > best.length) {
+          if (/sorry|unable|can'?t|cannot|policy|violat|rate limit/i.test(value)) {
+            best = value;
+          }
+        }
+      }
+    });
   }
+  return best;
 }
 
 function buildPrompt(input) {
@@ -160,7 +186,7 @@ function buildPrompt(input) {
 
 async function executeGeminiImage(ctx, input) {
   const { page, api, config } = ctx;
-  const waitTimeout = config?.backend?.pool?.waitTimeout ?? 300000;
+  const waitTimeout = config?.backend?.pool?.waitTimeout ?? 120000;
   const prompt = buildPrompt(input);
   const images = input.images || [];
 
@@ -197,10 +223,12 @@ async function executeGeminiImage(ctx, input) {
   await inputLocator.click({ timeout: 10000 });
   await page.keyboard.insertText(prompt);
 
+  api.log('info', '等待 StreamGenerate API', { providerType: input.providerType, waitTimeout });
   const responsePromise = page.waitForResponse((response) => {
     return response.url().includes('assistant.lamda.BardFrontendService/StreamGenerate') && response.request().method() === 'POST';
   }, { timeout: waitTimeout });
 
+  api.log('info', '发送提示词', { providerType: input.providerType });
   await page.getByRole('button', { name: 'Send message' }).click({ timeout: 10000 });
   const streamResponse = await responsePromise;
   if (!streamResponse.ok()) {
@@ -213,20 +241,57 @@ async function executeGeminiImage(ctx, input) {
     };
   }
 
+  api.log('info', '生成请求成功，开始解析 Gemini 响应');
   const bodyBuffer = await streamResponse.body();
   const imageUrls = extractImageUrlsFromResponse(bodyBuffer);
   if (imageUrls.length === 0) {
-    const text = extractAiTextFromResponse(bodyBuffer);
-    return {
-      success: false,
-      error: {
-        message: text ? text.substring(0, 200) : '响应中未找到图片结果',
-        retryable: false
+    api.log('warn', '响应体中未直接提取到图片 URL，尝试等待懒加载图片请求');
+
+    try {
+      const imageResponsePromise = page.waitForResponse((response) => {
+        const url = response.url();
+        return response.request().method() === 'GET' &&
+          response.status() === 200 &&
+          url.includes('googleusercontent.com/rd-gg-dl') &&
+          url.includes('=s1024-rj');
+      }, { timeout: Math.max(waitTimeout, 60000) });
+
+      try {
+        const modelResponse = page.locator('model-response').last();
+        await modelResponse.waitFor({ timeout: 20000, state: 'attached' });
+        await modelResponse.scrollIntoViewIfNeeded();
+      } catch {
+        // ignore missing DOM hint and rely on network wait only
       }
-    };
+
+      const imageResponse = await imageResponsePromise;
+      const file = await downloadImage(api, page, imageResponse.url());
+      return {
+        success: true,
+        data: {
+          created: Math.floor(Date.now() / 1000),
+          images: [
+            {
+              file
+            }
+          ]
+        }
+      };
+    } catch {
+      const text = extractAiTextFromResponse(bodyBuffer);
+      return {
+        success: false,
+        error: {
+          message: text ? text.substring(0, 200) : '响应中未找到图片结果',
+          retryable: false
+        }
+      };
+    }
   }
 
-  const file = await downloadImage(api, page, `${imageUrls[0]}=d-I`);
+  api.log('info', `找到 ${imageUrls.length} 张图片，开始下载`);
+  const imageUrl = imageUrls[0].includes('=') ? imageUrls[0] : `${imageUrls[0]}=d-I`;
+  const file = await downloadImage(api, page, imageUrl);
   return {
     success: true,
     data: {

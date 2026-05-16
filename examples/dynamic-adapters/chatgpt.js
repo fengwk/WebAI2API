@@ -9,6 +9,18 @@ async function waitForComposer(page, timeout = 30000) {
   await page.waitForSelector(INPUT_SELECTOR, { timeout });
 }
 
+async function clickFirstAvailable(locatorCandidates, options = {}) {
+  for (const locator of locatorCandidates) {
+    try {
+      await locator.click(options);
+      return true;
+    } catch {
+      // try next locator
+    }
+  }
+  return false;
+}
+
 async function uploadFiles(page, images) {
   if (!images?.length) return;
 
@@ -102,7 +114,7 @@ function buildPrompt(input) {
 
 async function executeChatgptImage(ctx, input) {
   const { page, api, config } = ctx;
-  const waitTimeout = config?.backend?.pool?.waitTimeout ?? 300000;
+  const waitTimeout = config?.backend?.pool?.waitTimeout ?? 120000;
   const prompt = buildPrompt(input);
   const images = input.images || [];
 
@@ -115,6 +127,7 @@ async function executeChatgptImage(ctx, input) {
 
   await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await waitForComposer(page);
+  await sleep(500);
 
   if (images.length > 0) {
     api.log('info', '开始上传参考图片', { count: images.length });
@@ -125,7 +138,16 @@ async function executeChatgptImage(ctx, input) {
   const composer = page.locator(INPUT_SELECTOR).first();
   await composer.click({ timeout: 10000 });
   await page.keyboard.insertText(prompt);
-  await page.keyboard.press('Enter');
+
+  api.log('info', '发送提示词', { providerType: input.providerType });
+  const clicked = await clickFirstAvailable([
+    page.getByRole('button', { name: /^Send prompt$/i }),
+    page.getByRole('button', { name: /^Send message$/i }),
+    page.locator('button[data-testid="send-button"]')
+  ], { timeout: 5000 });
+  if (!clicked) {
+    await page.keyboard.press('Enter');
+  }
 
   const conversationResponse = await page.waitForResponse((response) => {
     return response.url().includes('backend-api/f/conversation') && response.request().method() === 'POST';
@@ -173,10 +195,17 @@ async function executeChatgptImage(ctx, input) {
     }
   }
 
-  const imageTimeout = isImageGenerationStarted ? 120000 : 30000;
+  const imageTimeout = Math.max(waitTimeout, 120000);
   let downloadUrl = null;
+  let fileName = null;
 
   try {
+    api.log('info', '等待图片下载链接', {
+      providerType: input.providerType,
+      imageTimeout,
+      isImageGenerationStarted
+    });
+
     await page.waitForResponse(async (response) => {
       const url = response.url();
       if (!url.includes('backend-api/files/download/file_') || response.status() !== 200) {
@@ -184,8 +213,12 @@ async function executeChatgptImage(ctx, input) {
       }
       try {
         const json = await response.json();
-        if (json?.file_name?.startsWith('user-') && !json.file_name.includes('.part') && json.download_url) {
+        const fn = json?.file_name;
+        const dl = json?.download_url;
+        if (fn && !fn.includes('.part') && dl) {
+          fileName = fn;
           downloadUrl = json.download_url;
+          api.log('info', '图片生成完成', { fileName: fn });
           return true;
         }
       } catch {
@@ -222,6 +255,7 @@ async function executeChatgptImage(ctx, input) {
     };
   }
 
+  api.log('info', '开始下载图片', { downloadUrl, fileName });
   const file = await downloadImage(api, page, downloadUrl);
   return {
     success: true,
