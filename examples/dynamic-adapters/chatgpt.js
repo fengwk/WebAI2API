@@ -134,6 +134,8 @@ function buildPrompt(input) {
 
 async function waitForGeneratedImage(page, timeout) {
   const candidates = [
+    page.locator('img[src*="/backend-api/estuary/content?id=file_"]'),
+    page.locator('img[src*="backend-api/estuary/content?id=file_"]'),
     page.getByRole('img', { name: /已生成图片/i }),
     page.getByRole('img', { name: /Generated image/i }),
     page.locator('img[alt*="已生成图片"]'),
@@ -155,6 +157,12 @@ async function waitForGeneratedImage(page, timeout) {
 async function extractImageFile(api, page, imageLocator) {
   const source = await imageLocator.evaluate((img) => {
     return img.currentSrc || img.src || img.getAttribute('src') || '';
+  });
+  const alt = await imageLocator.evaluate((img) => img.getAttribute('alt') || '');
+
+  api.log('info', '提取生成图源地址', {
+    sourcePreview: source ? source.slice(0, 160) : '',
+    altPreview: alt ? alt.slice(0, 120) : ''
   });
 
   if (!source) {
