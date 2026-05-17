@@ -1,27 +1,33 @@
-import{O as Y,Q as Z,y as ee,p as y,S as l,t as n,x as te,o as d,K as c,s as p,r as m,q as L,g as z,H as N,J as s,n as M,G as v,M as w,m as U,A as r}from"./index.js";const ae={style:{width:"100%"}},oe={style:{display:"flex","justify-content":"space-between",gap:"8px","align-items":"center"}},le={style:{"font-weight":"600","word-break":"break-all"}},ne={style:{"font-size":"12px",color:"#8c8c8c","margin-top":"4px"}},se={style:{"font-size":"12px",color:"#8c8c8c","margin-top":"4px"}},re={key:0,style:{"font-size":"12px",color:"#ff4d4f","margin-top":"4px","word-break":"break-all"}},ie={style:{"margin-bottom":"12px",display:"flex","flex-direction":"column",gap:"8px"}},ue={key:0,style:{"font-size":"12px",color:"#8c8c8c"}},pe={__name:"adapters",setup(de){const f=Y(),b=v(!1),h=v(!1),S=v(!1),t=v(""),i=v(""),g=v(!1),x=v(""),u=M(()=>f.adaptersMeta),O=M(()=>u.value.find(e=>e.id===t.value)||null),$=M(()=>O.value?.providers||[]);function R(e){return`export const manifest = {
-  id: '${e}',
-  name: '${e}',
-  providers: [
-    {
-      type: 'openai-images-generations',
-      models: ['gpt-image-2'],
-      async execute(ctx, input) {
-        const { page, api } = ctx;
-        api.log('info', '开始执行动态适配器', {
-          providerType: 'openai-images-generations',
-          model: input.model,
-          promptLength: String(input.prompt || '').length
-        });
-        await page.goto('https://example.com', { waitUntil: 'domcontentloaded' });
-        return {
-          success: false,
-          error: {
-            message: '请编辑脚本后再通过 /v1 接口验证',
-            retryable: false
-          }
-        };
+import{j as H,K,N as Q,w as W,n as x,O as o,r as n,v as X,m as l,H as r,q as f,p as j,o as Y,f as Z,G as i,l as J,A as c,M as h,k as $,y as v}from"./index.js";const ee={style:{width:"100%"}},te={style:{display:"flex","justify-content":"space-between",gap:"8px","align-items":"center"}},ae={style:{"font-weight":"600","word-break":"break-all"}},oe={style:{"font-size":"12px",color:"#8c8c8c","margin-top":"4px"}},ne={style:{"font-size":"12px",color:"#8c8c8c","margin-top":"4px"}},le={key:0,style:{"font-size":"12px",color:"#ff4d4f","margin-top":"4px","word-break":"break-all"}},se={class:"schema-panel"},ie={class:"schema-json"},re={class:"schema-json"},ue={__name:"adapters",setup(de){const p=K(),w=c(!1),b=c(!1),k=c(!1),t=c(""),u=c(""),_=c(!1),y=c(""),d=J(()=>p.adaptersMeta),S=J(()=>d.value.find(a=>a.id===t.value)||null);function I(a){return`export const manifest = {
+  id: '${a}',
+  name: '${a}',
+  inputJsonSchema: {
+    type: 'object',
+    required: ['prompt'],
+    properties: {
+      prompt: {
+        type: 'string',
+        title: 'Prompt',
+        description: '输入提示词',
+        'x-ui': 'textarea'
       }
     }
-  ]
+  },
+  outputJsonSchema: {
+    type: 'object',
+    required: ['message'],
+    properties: {
+      message: {
+        type: 'string',
+        title: 'Message'
+      }
+    }
+  },
+  async execute(ctx, input) {
+    const { page, api } = ctx;
+    await page.goto('https://example.com', { waitUntil: 'domcontentloaded' });
+    api.log('info', '开始执行适配器', { promptLength: String(input.prompt || '').length });
+    return { message: '请编辑脚本后再调用 /api/${a}' };
+  }
 };
-`}async function _(){b.value=!0;try{await f.fetchAdaptersMeta(),!t.value&&u.value.length>0?t.value=u.value[0].id:t.value&&!u.value.some(e=>e.id===t.value)&&(t.value=u.value[0]?.id||"")}finally{b.value=!1}}async function T(e){if(!e){i.value="";return}h.value=!0;try{i.value=await f.fetchAdapterSource(e)}catch(o){U.error(o.message),i.value=""}finally{h.value=!1}}async function j(){if(t.value){S.value=!0;try{await f.saveAdapterSource(t.value,i.value),await _(),await T(t.value)}catch(e){w.error({title:"保存失败",content:e.message})}finally{S.value=!1}}}function F(){x.value="",g.value=!0}async function q(){const e=x.value.trim();if(!e){U.warning("请输入适配器 ID");return}try{await f.saveAdapterSource(e,R(e)),g.value=!1,await _(),t.value=e}catch(o){w.error({title:"创建失败",content:o.message})}}function E(){t.value&&w.confirm({title:"删除适配器脚本",content:`确定要删除 ${t.value} 吗？`,okText:"删除",okType:"danger",cancelText:"取消",async onOk(){try{const e=t.value;await f.deleteAdapterSource(e),t.value="",i.value="",await _()}catch(e){w.error({title:"删除失败",content:e.message})}}})}return Z(t,async e=>{await T(e)}),ee(async()=>{await _()}),(e,o)=>{const k=s("a-button"),I=s("a-space"),V=s("a-empty"),C=s("a-tag"),G=s("a-list-item"),H=s("a-list"),B=s("a-card"),D=s("a-col"),J=s("a-alert"),K=s("a-textarea"),P=s("a-row"),Q=s("a-input"),W=s("a-modal"),X=s("a-layout");return r(),y(X,{style:{background:"transparent",gap:"16px"}},{default:l(()=>[n(P,{gutter:16},{default:l(()=>[n(D,{xs:24,lg:7},{default:l(()=>[n(B,{title:"适配器脚本",bordered:!1},{extra:l(()=>[n(I,null,{default:l(()=>[n(k,{type:"link",onClick:_,loading:b.value},{default:l(()=>[...o[3]||(o[3]=[p("刷新",-1)])]),_:1},8,["loading"]),n(k,{type:"primary",size:"small",onClick:F},{default:l(()=>[...o[4]||(o[4]=[p("新建",-1)])]),_:1})]),_:1})]),default:l(()=>[u.value.length===0?(r(),y(V,{key:0,description:"暂无适配器脚本，请先新建"})):(r(),y(H,{key:1,"data-source":u.value,size:"small",bordered:""},{renderItem:l(({item:a})=>[n(G,{onClick:A=>t.value=a.id,style:te({cursor:"pointer",background:t.value===a.id?"#e6f4ff":""})},{default:l(()=>[d("div",ae,[d("div",oe,[d("span",le,c(a.id),1),n(C,{color:a.valid?"success":"error"},{default:l(()=>[p(c(a.valid?"有效":"无效"),1)]),_:2},1032,["color"])]),d("div",ne,c(a.name||a.id),1),d("div",se," Provider 数: "+c(a.providers?.length||0),1),a.error?(r(),m("div",re,c(a.error),1)):L("",!0)])]),_:2},1032,["onClick","style"])]),_:1},8,["data-source"]))]),_:1})]),_:1}),n(D,{xs:24,lg:17},{default:l(()=>[n(B,{title:t.value?`编辑脚本 - ${t.value}`:"适配器脚本编辑器",bordered:!1},{extra:l(()=>[n(I,null,{default:l(()=>[n(k,{danger:"",onClick:E,disabled:!t.value},{default:l(()=>[...o[5]||(o[5]=[p("删除",-1)])]),_:1},8,["disabled"]),n(k,{type:"primary",onClick:j,loading:S.value,disabled:!t.value},{default:l(()=>[...o[6]||(o[6]=[p("保存",-1)])]),_:1},8,["loading","disabled"])]),_:1})]),default:l(()=>[t.value?(r(),m(z,{key:1},[d("div",ie,[$.value.length===0?(r(),m("div",ue," 当前脚本未声明任何 provider。 ")):L("",!0),(r(!0),m(z,null,N($.value,a=>(r(),m("div",{key:`${a.type}-${a.models?.join(",")}`,style:{display:"flex",gap:"8px","flex-wrap":"wrap","align-items":"center"}},[n(C,{color:"blue"},{default:l(()=>[p(c(a.type),1)]),_:2},1024),(r(!0),m(z,null,N(a.models||[],A=>(r(),y(C,{key:A},{default:l(()=>[p(c(A),1)]),_:2},1024))),128))]))),128))]),n(J,{type:"info","show-icon":"",style:{"margin-bottom":"12px"},message:"保存时仅做静态校验；真实功能请通过正式 /v1 接口验证，页面级排障请使用 /admin/debug/run。"}),n(K,{value:i.value,"onUpdate:value":o[0]||(o[0]=a=>i.value=a),"auto-size":{minRows:24,maxRows:32},disabled:h.value,style:{"font-family":"'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace"}},null,8,["value","disabled"])],64)):(r(),y(V,{key:0,description:"请选择或创建一个适配器脚本"}))]),_:1},8,["title"])]),_:1})]),_:1}),n(W,{open:g.value,"onUpdate:open":o[2]||(o[2]=a=>g.value=a),title:"新建适配器脚本","ok-text":"创建","cancel-text":"取消",onOk:q},{default:l(()=>[o[7]||(o[7]=d("div",{style:{"font-size":"12px",color:"#8c8c8c","margin-bottom":"8px"}}," 适配器 ID 将作为文件名与 manifest.id，建议只使用字母、数字、点、下划线和中划线。 ",-1)),n(Q,{value:x.value,"onUpdate:value":o[1]||(o[1]=a=>x.value=a),placeholder:"例如: chatgpt"},null,8,["value"])]),_:1},8,["open"])]),_:1})}}};export{pe as default};
+`}async function m(){w.value=!0;try{await p.fetchAdaptersMeta(),!t.value&&d.value.length>0?t.value=d.value[0].id:t.value&&!d.value.some(a=>a.id===t.value)&&(t.value=d.value[0]?.id||"")}finally{w.value=!1}}async function C(a){if(!a){u.value="";return}b.value=!0;try{u.value=await p.fetchAdapterSource(a)}catch(e){$.error(e.message),u.value=""}finally{b.value=!1}}async function O(){if(t.value){k.value=!0;try{await p.saveAdapterSource(t.value,u.value),await m(),await C(t.value)}catch(a){h.error({title:"保存失败",content:a.message})}finally{k.value=!1}}}function T(){y.value="",_.value=!0}async function V(){const a=y.value.trim();if(!a){$.warning("请输入适配器 ID");return}try{await p.saveAdapterSource(a,I(a)),_.value=!1,await m(),t.value=a}catch(e){h.error({title:"创建失败",content:e.message})}}function B(){t.value&&h.confirm({title:"删除适配器脚本",content:`确定要删除 ${t.value} 吗？`,okText:"删除",okType:"danger",cancelText:"取消",async onOk(){await p.deleteAdapterSource(t.value),t.value="",u.value="",await m()}})}return Q(t,async a=>{await C(a)}),W(async()=>{await m()}),(a,e)=>{const g=i("a-button"),A=i("a-space"),M=i("a-empty"),D=i("a-tag"),U=i("a-list-item"),q=i("a-list"),z=i("a-card"),N=i("a-col"),L=i("a-alert"),R=i("a-textarea"),F=i("a-row"),P=i("a-input"),E=i("a-modal"),G=i("a-layout");return v(),x(G,{style:{background:"transparent",gap:"16px"}},{default:o(()=>[n(F,{gutter:16},{default:o(()=>[n(N,{xs:24,lg:7},{default:o(()=>[n(z,{title:"适配器脚本",bordered:!1},{extra:o(()=>[n(A,null,{default:o(()=>[n(g,{type:"link",onClick:m,loading:w.value},{default:o(()=>[...e[3]||(e[3]=[f("刷新",-1)])]),_:1},8,["loading"]),n(g,{type:"primary",size:"small",onClick:T},{default:o(()=>[...e[4]||(e[4]=[f("新建",-1)])]),_:1})]),_:1})]),default:o(()=>[d.value.length===0?(v(),x(M,{key:0,description:"暂无适配器脚本，请先新建"})):(v(),x(q,{key:1,"data-source":d.value,size:"small",bordered:""},{renderItem:o(({item:s})=>[n(U,{onClick:ce=>t.value=s.id,style:X({cursor:"pointer",background:t.value===s.id?"#e6f4ff":""})},{default:o(()=>[l("div",ee,[l("div",te,[l("span",ae,r(s.id),1),n(D,{color:s.valid?"success":"error"},{default:o(()=>[f(r(s.valid?"有效":"无效"),1)]),_:2},1032,["color"])]),l("div",oe,r(s.name||s.id),1),l("div",ne,[l("code",null,r(s.endpoint),1)]),s.error?(v(),j("div",le,r(s.error),1)):Y("",!0)])]),_:2},1032,["onClick","style"])]),_:1},8,["data-source"]))]),_:1})]),_:1}),n(N,{xs:24,lg:17},{default:o(()=>[n(z,{title:t.value?`编辑脚本 - ${t.value}`:"适配器脚本编辑器",bordered:!1},{extra:o(()=>[n(A,null,{default:o(()=>[n(g,{danger:"",onClick:B,disabled:!t.value},{default:o(()=>[...e[5]||(e[5]=[f("删除",-1)])]),_:1},8,["disabled"]),n(g,{type:"primary",onClick:O,loading:k.value,disabled:!t.value},{default:o(()=>[...e[6]||(e[6]=[f("保存",-1)])]),_:1},8,["loading","disabled"])]),_:1})]),default:o(()=>[t.value?(v(),j(Z,{key:1},[l("div",se,[l("div",null,[e[7]||(e[7]=l("div",{class:"schema-title"},"接口路径",-1)),l("code",null,r(S.value?.endpoint),1)]),l("div",null,[e[8]||(e[8]=l("div",{class:"schema-title"},"输入 Schema",-1)),l("pre",ie,r(JSON.stringify(S.value?.inputJsonSchema,null,2)),1)]),l("div",null,[e[9]||(e[9]=l("div",{class:"schema-title"},"输出 Schema",-1)),l("pre",re,r(JSON.stringify(S.value?.outputJsonSchema,null,2)),1)])]),n(L,{type:"info","show-icon":"",style:{"margin-bottom":"12px"},message:"保存时仅做静态校验。接口测试请前往“请求 API”，页面级排障请使用 /admin/debug/run。"}),n(R,{value:u.value,"onUpdate:value":e[0]||(e[0]=s=>u.value=s),"auto-size":{minRows:24,maxRows:32},disabled:b.value,style:{"font-family":"'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace"}},null,8,["value","disabled"])],64)):(v(),x(M,{key:0,description:"请选择或创建一个适配器脚本"}))]),_:1},8,["title"])]),_:1})]),_:1}),n(E,{open:_.value,"onUpdate:open":e[2]||(e[2]=s=>_.value=s),title:"新建适配器脚本","ok-text":"创建","cancel-text":"取消",onOk:V},{default:o(()=>[e[10]||(e[10]=l("div",{style:{"font-size":"12px",color:"#8c8c8c","margin-bottom":"8px"}}," 适配器 ID 将同时作为文件名、manifest.id 与接口路径 /api/{adapter_id}。 ",-1)),n(P,{value:y.value,"onUpdate:value":e[1]||(e[1]=s=>y.value=s),placeholder:"例如: chatgpt"},null,8,["value"])]),_:1},8,["open"])]),_:1})}}},ve=H(ue,[["__scopeId","data-v-543770fb"]]);export{ve as default};

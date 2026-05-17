@@ -12,9 +12,7 @@ export const useSettingsStore = defineStore('settings', {
             waitTimeout: 120,
             failover: {
                 enabled: false,
-                maxRetries: 3,
-                imgDlRetry: false,
-                imgDlRetryMaxRetries: 2
+                maxRetries: 3
             }
         },
         adapterConfig: {},
@@ -170,9 +168,7 @@ export const useSettingsStore = defineStore('settings', {
                         waitTimeout: data.waitTimeout ?? 120,
                         failover: {
                             enabled: data.failover?.enabled || false,
-                            maxRetries: data.failover?.maxRetries || 3,
-                            imgDlRetry: data.failover?.imgDlRetry || false,
-                            imgDlRetryMaxRetries: data.failover?.imgDlRetryMaxRetries ?? 2
+                            maxRetries: data.failover?.maxRetries || 3
                         }
                     };
                 }

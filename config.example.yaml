@@ -7,15 +7,7 @@ server:
   # 鉴权 API Token 至少为 10 个字符 (可使用 npm run genkey 生成)
   # 该配置会对 API 接口和 WebUI 生效
   auth: sk-change-me-to-your-secure-key
-  # 流式请求心跳设置 (自动对 stream: true 的请求发送心跳防止超时)
-  keepalive:
-    # 心跳模式
-    # "comment": (推荐) 发送 :keepalive 注释，不污染数据
-    # "content": (备用) 发送空 delta，仅当客户端必须收到 JSON 包才重置超时时使用
-    mode: "comment"
-  # 图片生成结果返回 Markdown 格式
-  imageMarkdown: false
-  # 当图片接口返回 url 时，拼接外部可访问地址的基准 URL。
+  # 当脚本通过 helper 输出 URL 文件时，拼接外部可访问地址的基准 URL。
   # 例如部署在反代前缀 /proxy/gpt-image 下时，可配置为：
   # https://gpt-load.kk1.fun/proxy/gpt-image
   # 留空时返回站内相对路径 /files/...
@@ -40,8 +32,6 @@ backend:
     failover:
       enabled: true           # 启用故障转移
       maxRetries: 2           # 最多重试次数 (0=无限制)
-      imgDlRetry: false       # 图片下载器重试，为图片生成结果单独提供重试机会
-      imgDlRetryMaxRetries: 2 # 图片下载器重试次数
 
     # ========================================
     # 生成等待时间
@@ -101,11 +91,6 @@ backend:
       #     - name: "us_zai"
       #       type: zai_is
       #     
-      #     # 聚合类型 Worker (跨站点聚合/故障转移)
-      #     - name: "us_merged"
-      #       type: merge
-      #       mergeTypes: [chatgpt, gemini]
-
       # [实例 3] 强制直连 (不使用代理)
       # - name: "browser_direct"
       #   userDataMark: "direct"
@@ -135,9 +120,6 @@ queue:
   # 实际队列上限 = Workers数量 + queueBuffer
   # 设为 0 则不限制非流式请求数量
   queueBuffer: 2
-  # 图片数量上限 
-  # 网页最多支持10个附件，如果设置大于10则直接丢弃超出10的图片
-  imageLimit: 5
 
 browser:
   # 浏览器可执行文件路径 (留空则使用默认的)

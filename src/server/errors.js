@@ -4,7 +4,7 @@
  */
 
 /**
- * 错误类型枚举 (OpenAI 标准)
+ * 错误类型枚举
  * @readonly
  * @enum {string}
  */
@@ -33,18 +33,6 @@ export const ERROR_CODES = {
     BROWSER_NOT_INITIALIZED: 'BROWSER_NOT_INITIALIZED',
     /** 服务器繁忙（队列已满） */
     SERVER_BUSY: 'SERVER_BUSY',
-    /** 请求参数缺少 messages */
-    NO_MESSAGES: 'NO_MESSAGES',
-    /** messages 中缺少 role=user 的消息 */
-    NO_USER_MESSAGES: 'NO_USER_MESSAGES',
-    /** 图片数量超过限制 */
-    TOO_MANY_IMAGES: 'TOO_MANY_IMAGES',
-    /** 模型无效/后端不支持 */
-    INVALID_MODEL: 'INVALID_MODEL',
-    /** 该模型需要参考图 */
-    IMAGE_REQUIRED: 'IMAGE_REQUIRED',
-    /** 该模型不支持图片输入 */
-    IMAGE_FORBIDDEN: 'IMAGE_FORBIDDEN',
     /** 触发人机验证（reCAPTCHA） */
     RECAPTCHA: 'RECAPTCHA',
     /** 服务器内部错误 */
@@ -82,36 +70,6 @@ const ERROR_DETAILS = {
         message: '服务器繁忙（队列已满）',
         status: 429,
         type: ERROR_TYPES.RATE_LIMIT,
-    },
-    [ERROR_CODES.NO_MESSAGES]: {
-        message: '请求参数缺少 messages',
-        status: 400,
-        type: ERROR_TYPES.INVALID_REQUEST,
-    },
-    [ERROR_CODES.NO_USER_MESSAGES]: {
-        message: 'messages 中缺少 role=user 的消息',
-        status: 400,
-        type: ERROR_TYPES.INVALID_REQUEST,
-    },
-    [ERROR_CODES.TOO_MANY_IMAGES]: {
-        message: '图片数量超过限制',
-        status: 400,
-        type: ERROR_TYPES.INVALID_REQUEST,
-    },
-    [ERROR_CODES.INVALID_MODEL]: {
-        message: '模型无效/后端不支持',
-        status: 400,
-        type: ERROR_TYPES.INVALID_REQUEST,
-    },
-    [ERROR_CODES.IMAGE_REQUIRED]: {
-        message: '该模型需要参考图',
-        status: 400,
-        type: ERROR_TYPES.INVALID_REQUEST,
-    },
-    [ERROR_CODES.IMAGE_FORBIDDEN]: {
-        message: '该模型不支持图片输入',
-        status: 400,
-        type: ERROR_TYPES.INVALID_REQUEST,
     },
     [ERROR_CODES.RECAPTCHA]: {
         message: '触发人机验证（reCAPTCHA）',
@@ -156,43 +114,3 @@ export function getErrorStatus(code) {
 export function getErrorDetails(code) {
     return ERROR_DETAILS[code] || { message: '未知错误', status: 500 };
 }
-
-// ==========================================
-// 适配器层错误码（从 constants.js 统一到此处）
-// ==========================================
-
-/**
- * 适配器错误码
- * @readonly
- */
-export const ADAPTER_ERRORS = {
-    /** 页面已关闭 */
-    PAGE_CLOSED: 'PAGE_CLOSED',
-
-    /** 页面崩溃 */
-    PAGE_CRASHED: 'PAGE_CRASHED',
-
-    /** 页面状态无效 */
-    PAGE_INVALID: 'PAGE_INVALID',
-
-    /** 网络错误 */
-    NETWORK_ERROR: 'NETWORK_ERROR',
-
-    /** 超时错误 */
-    TIMEOUT_ERROR: 'TIMEOUT_ERROR',
-
-    /** HTTP 错误 */
-    HTTP_ERROR: 'HTTP_ERROR',
-
-    /** 限流 */
-    RATE_LIMITED: 'RATE_LIMITED',
-
-    /** 需要验证码 */
-    CAPTCHA_REQUIRED: 'CAPTCHA_REQUIRED',
-
-    /** 需要登录 */
-    AUTH_REQUIRED: 'AUTH_REQUIRED',
-
-    /** 内容被阻止 (API/页面检测到错误关键词) */
-    CONTENT_BLOCKED: 'CONTENT_BLOCKED',
-};

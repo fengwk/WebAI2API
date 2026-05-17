@@ -32,13 +32,6 @@ export function validateServerConfig(data) {
         }
     }
 
-    // Keepalive Mode 校验
-    if (data.keepaliveMode !== undefined) {
-        if (!['comment', 'content'].includes(data.keepaliveMode)) {
-            errors.push('keepaliveMode 必须是 comment 或 content');
-        }
-    }
-
     // Log Level 校验
     if (data.logLevel !== undefined) {
         if (!['debug', 'info', 'warn', 'error'].includes(data.logLevel)) {
@@ -53,20 +46,6 @@ export function validateServerConfig(data) {
         } else if (data.queueBuffer < 0) {
             errors.push('queueBuffer 不能为负数');
         }
-    }
-
-    // Image Limit 校验
-    if (data.imageLimit !== undefined) {
-        if (typeof data.imageLimit !== 'number' || !Number.isInteger(data.imageLimit)) {
-            errors.push('imageLimit 必须是整数');
-        } else if (data.imageLimit < 1 || data.imageLimit > 10) {
-            errors.push('imageLimit 必须在 1-10 范围内');
-        }
-    }
-
-    // Image Markdown 校验
-    if (data.imageMarkdown !== undefined && typeof data.imageMarkdown !== 'boolean') {
-        errors.push('imageMarkdown 必须是布尔值');
     }
 
     if (data.publicFileBaseUrl !== undefined) {
@@ -142,9 +121,7 @@ export function validateInstancesConfig(data) {
     const instanceNames = new Set();
     const workerNames = new Set();
 
-    // 获取有效的适配器类型列表
     const validAdapterTypes = new Set(registry.getAdapterIds());
-    validAdapterTypes.add('merge'); // merge 是特殊类型
 
     for (let i = 0; i < data.length; i++) {
         const inst = data[i];
@@ -215,17 +192,8 @@ export function validateInstancesConfig(data) {
                     logger.warn('配置器', `${wPrefix}: type "${w.type}" 当前无对应适配器，保存不阻断，启动时该 Worker 可能会被跳过`);
                 }
 
-                // merge 类型特殊校验
-                if (w.type === 'merge') {
-                    if (!w.mergeTypes || !Array.isArray(w.mergeTypes) || w.mergeTypes.length === 0) {
-                        errors.push(`${wPrefix}: merge 类型必须指定 mergeTypes 数组`);
-                    } else {
-                        for (const mt of w.mergeTypes) {
-                            if (!validAdapterTypes.has(mt) || mt === 'merge') {
-                                errors.push(`${wPrefix}: mergeTypes 中的 "${mt}" 不是有效的适配器类型`);
-                            }
-                        }
-                    }
+                if (w.mergeTypes !== undefined) {
+                    errors.push(`${wPrefix}: mergeTypes 已废弃，请删除该字段`);
                 }
             }
         }
@@ -259,16 +227,6 @@ export function validatePoolConfig(data) {
                 errors.push('failover.maxRetries 必须是整数');
             } else if (data.failover.maxRetries < 0) {
                 errors.push('failover.maxRetries 不能为负数');
-            }
-        }
-        if (data.failover.imgDlRetry !== undefined && typeof data.failover.imgDlRetry !== 'boolean') {
-            errors.push('failover.imgDlRetry 必须是布尔值');
-        }
-        if (data.failover.imgDlRetryMaxRetries !== undefined) {
-            if (typeof data.failover.imgDlRetryMaxRetries !== 'number' || !Number.isInteger(data.failover.imgDlRetryMaxRetries)) {
-                errors.push('failover.imgDlRetryMaxRetries 必须是整数');
-            } else if (data.failover.imgDlRetryMaxRetries < 1 || data.failover.imgDlRetryMaxRetries > 10) {
-                errors.push('failover.imgDlRetryMaxRetries 必须在 1-10 范围内');
             }
         }
     }

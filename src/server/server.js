@@ -1,13 +1,9 @@
 /**
  * @fileoverview LMArena Image Automator 服务器入口
- * @description HTTP API 服务器，提供 OpenAI 兼容的图像生成接口
+ * @description HTTP API 服务器，提供动态适配器接口
  *
  * 支持的端点：
- * - GET  /v1/models               - 获取可用模型列表
- * - GET  /v1/cookies              - 获取当前浏览器 Cookies
- * - POST /v1/chat/completions     - Chat Completions
- * - POST /v1/images/generations   - Images Generations
- * - POST /v1/images/edits         - Images Edits
+ * - POST /api/{adapter_id}        - 动态适配器接口
  *
  * 启动方式：
  * - 通过 supervisor.js 启动（推荐，支持自动重启和 Xvfb 管理）
@@ -49,10 +45,7 @@ const {
     name: backendName,
     initBrowser,
     executeTask,
-    TEMP_DIR,
-    getModels,
-    getDefaultModel,
-    hasModel
+    TEMP_DIR
 } = backend;
 
 /** @type {number} 服务器端口 */
@@ -61,17 +54,11 @@ const PORT = config.server?.port || 3000;
 /** @type {string} 认证令牌 */
 const AUTH_TOKEN = config.server?.auth;
 
-/** @type {string} 心跳模式 */
-const KEEPALIVE_MODE = config.server?.keepalive?.mode || 'comment';
-
 /** @type {number} 最大并发数 */
 const MAX_CONCURRENT = config.queue?.maxConcurrent || 1;
 
 /** @type {number} 队列缓冲区（0 表示不限制非流式） */
 const QUEUE_BUFFER = config.queue?.queueBuffer ?? 2;
-
-/** @type {number} 图片数量限制 */
-const IMAGE_LIMIT = config.queue?.imageLimit || 5;
 
 // ==================== 创建服务组件 ====================
 
@@ -81,14 +68,12 @@ const IMAGE_LIMIT = config.queue?.imageLimit || 5;
 const queueManager = createQueueManager(
     {
         maxConcurrent: MAX_CONCURRENT,
-        queueBuffer: QUEUE_BUFFER,
-        keepaliveMode: KEEPALIVE_MODE
+        queueBuffer: QUEUE_BUFFER
     },
     {
         initBrowser,
         executeTask,
         config,
-        navigateToMonitor: null,
         getCookies: backend.getCookies
             ? (workerName, domain) => backend.getCookies(workerName, domain)
             : null
@@ -107,7 +92,7 @@ const isLoginMode = process.argv.some(arg => arg.startsWith('-login'));
  * 当 Pool 初始化失败时进入安全模式，此时：
  * - HTTP 服务器正常启动
  * - Admin API 和 WebUI 可用
- * - OpenAI API 返回 503
+ * - 动态适配器 API 返回 503
  */
 let safeMode = false;
 let safeModeReason = null;
@@ -115,11 +100,7 @@ let safeModeReason = null;
 const handleRequest = createGlobalRouter({
     authToken: AUTH_TOKEN,
     backendName,
-    getModels,
-    getDefaultModel,
-    hasModel,
     tempDir: TEMP_DIR,
-    imageLimit: IMAGE_LIMIT,
     queueManager,
     config,
     loginMode: isLoginMode,
@@ -154,7 +135,7 @@ async function startServer() {
         await queueManager.initializePool();
     } catch (err) {
         logger.error('服务器', '工作池初始化失败', { error: err.message });
-        logger.warn('服务器', '进入安全模式：WebUI 和 Admin API 可用，OpenAI API 不可用');
+        logger.warn('服务器', '进入安全模式：WebUI 和 Admin API 可用，动态适配器 API 不可用');
         logger.warn('服务器', '请通过 配置文件或者 WebUI 修改正确的配置后重启服务');
         safeMode = true;
         safeModeReason = err.message;
@@ -182,8 +163,7 @@ async function startServer() {
         logger.info('服务器', `HTTP 服务器已启动，端口: ${PORT}${modeExtra}`);
         logger.info('服务器', `运行模式: ${mode}`);
         if (!isLoginMode) {
-            logger.info('服务器', `流式心跳模式: ${KEEPALIVE_MODE}`);
-            logger.info('服务器', `最大并发: ${MAX_CONCURRENT}，队列缓冲: ${QUEUE_BUFFER}，最大图片数量: ${IMAGE_LIMIT}`);
+            logger.info('服务器', `最大并发: ${MAX_CONCURRENT}，队列缓冲: ${QUEUE_BUFFER}`);
         }
     });
 }

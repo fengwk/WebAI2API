@@ -23,32 +23,16 @@ onMounted(async () => {
     ]);
 });
 
-// 计算属性：适配器选项（包含 merge）
+// 计算属性：适配器选项
 const adapterOptions = computed(() => {
-    const options = settingsStore.adaptersMeta.filter(a => a.valid !== false).map(a => ({
+    return settingsStore.adaptersMeta.filter(a => a.valid !== false).map(a => ({
         label: a.name || a.id,
         value: a.id
     }));
-    // 将 Merge 选项放在第一个位置
-    if (!options.find(o => o.value === 'merge')) {
-        options.unshift({ label: 'Merge（聚合模式）', value: 'merge' });
-    }
-    return options;
-});
-
-// 计算属性：可聚合的适配器选项（不包含 merge，避免套娃）
-const mergeableAdapterOptions = computed(() => {
-    return settingsStore.adaptersMeta
-        .filter(a => a.id !== 'merge' && a.valid !== false)
-        .map(a => ({
-            label: a.name || a.id,
-            value: a.id
-        }));
 });
 
 // 辅助函数：根据适配器 ID 获取名称
 const getAdapterDisplayName = (id) => {
-    if (id === 'merge') return 'Merge（聚合模式）';
     const adapter = settingsStore.adaptersMeta.find(a => a.id === id);
     return adapter?.name || id;
 };
@@ -276,8 +260,7 @@ const editingWorkerIndex = ref(-1);
 const workerFormVisible = ref(false);
 const workerForm = ref({
         name: '',
-        type: adapterOptions.value.find(o => o.value !== 'merge')?.value || 'merge',
-        mergeTypes: []
+        type: adapterOptions.value[0]?.value || ''
     });
 
 // 添加Worker
@@ -286,8 +269,7 @@ const handleAddWorker = () => {
     const randomSuffix = Math.random().toString(36).substring(2, 7);
     workerForm.value = {
         name: `worker-${editForm.value.workers.length + 1}-${randomSuffix}`,
-        type: adapterOptions.value.find(o => o.value !== 'merge')?.value || 'merge',
-        mergeTypes: []
+        type: adapterOptions.value[0]?.value || ''
     };
     workerFormVisible.value = true;
 };
@@ -298,8 +280,7 @@ const handleEditWorker = (index) => {
     const worker = editForm.value.workers[index];
     workerForm.value = {
         name: worker.name,
-        type: worker.type,
-        mergeTypes: worker.mergeTypes ? [...worker.mergeTypes] : []
+        type: worker.type
     };
     workerFormVisible.value = true;
 };
@@ -377,31 +358,6 @@ const handleRemoveWorker = (index) => {
                             </a-col>
                         </a-row>
 
-                        <a-divider style="margin: 12px 0;" />
-
-                        <a-row :gutter="16">
-                            <a-col :xs="24" :md="12">
-                                <div style="margin-bottom: 8px;">
-                                    <div style="font-weight: 600; margin-bottom: 8px;">图片下载重试</div>
-                                    <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 12px;">
-                                        启用后，图片/视频下载失败时会自动重试下载（不重新生成）
-                                    </div>
-                                    <a-switch v-model:checked="poolConfig.failover.imgDlRetry" />
-                                </div>
-                            </a-col>
-
-                            <a-col :xs="24" :md="12">
-                                <div style="margin-bottom: 8px;">
-                                    <div style="font-weight: 600; margin-bottom: 8px;">下载重试次数</div>
-                                    <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 12px;">
-                                        图片下载失败时的最大重试次数，范围 1-10
-                                    </div>
-                                    <a-input-number v-model:value="poolConfig.failover.imgDlRetryMaxRetries" :min="1"
-                                        :max="10" :disabled="!poolConfig.failover.imgDlRetry" style="width: 100%"
-                                        placeholder="请输入下载重试次数" />
-                                </div>
-                            </a-col>
-                        </a-row>
                     </a-collapse-panel>
                 </a-collapse>
             </div>
@@ -563,15 +519,12 @@ const handleRemoveWorker = (index) => {
                                     <a @click="handleEditWorker(index)">编辑</a>
                                     <a style="color: #ff4d4f" @click="handleRemoveWorker(index)">删除</a>
                                 </template>
-                                <div>
-                                    <div style="font-weight: 600;">{{ item.name }}</div>
-                                     <div style="font-size: 12px; color: #8c8c8c;">
-                                         类型: {{ getAdapterDisplayName(item.type) }}
-                                         <span v-if="item.type === 'merge'">
-                                            | 聚合: {{ item.mergeTypes?.map(getAdapterDisplayName).join(', ') || '无' }}
-                                         </span>
-                                     </div>
-                                 </div>
+                <div>
+                    <div style="font-weight: 600;">{{ item.name }}</div>
+                                    <div style="font-size: 12px; color: #8c8c8c;">
+                                        类型: {{ getAdapterDisplayName(item.type) }}
+                                    </div>
+                                </div>
                             </a-list-item>
                         </template>
                     </a-list>
@@ -602,19 +555,6 @@ const handleRemoveWorker = (index) => {
                 <div style="font-weight: 600; margin-bottom: 8px;">适配器</div>
                 <a-select v-model:value="workerForm.type" style="width: 100%" :options="adapterOptions" />
             </div>
-
-            <!-- Merge 模式额外配置 -->
-            <template v-if="workerForm.type === 'merge'">
-                <div style="margin-bottom: 16px;">
-                    <div style="font-weight: 600; margin-bottom: 4px;">聚合类型</div>
-                    <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
-                        选择要聚合的后端适配器（可多选）
-                    </div>
-                    <a-select v-model:value="workerForm.mergeTypes" mode="multiple" style="width: 100%"
-                        placeholder="选择要聚合的适配器" :options="mergeableAdapterOptions">
-                    </a-select>
-                </div>
-            </template>
         </a-modal>
 
         <!-- 批量代理设置模态框 -->

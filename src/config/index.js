@@ -138,10 +138,8 @@ function validateWorker(worker, instanceName, index) {
     // 移除对 type 的硬编码校验，允许动态加载新适配器
     // if (!VALID_ADAPTER_TYPES.includes(worker.type)) { ... }
 
-    if (worker.type === 'merge') {
-        if (!worker.mergeTypes || !Array.isArray(worker.mergeTypes) || worker.mergeTypes.length === 0) {
-            throw new Error(`Worker "${worker.name}" 类型为 merge，但缺少有效的 mergeTypes 数组`);
-        }
+    if (worker.mergeTypes !== undefined) {
+        throw new Error(`Worker "${worker.name}" 使用了已废弃的 mergeTypes 配置`);
     }
 }
 
@@ -178,7 +176,6 @@ function flattenInstancesToWorkers(instances, globalProxy) {
                 // Worker 自身属性
                 name: worker.name,
                 type: worker.type,
-                mergeTypes: worker.mergeTypes || [],
 
                 // 从 Instance 继承的属性
                 instanceName: instance.name,
@@ -240,17 +237,6 @@ export function loadConfig() {
         logger.warn('配置器', 'server.auth 长度少于 10 个字符，安全性较低，建议使用 npm run genkey 生成密钥');
     }
 
-    // 设置 keepalive 配置默认值
-    if (!config.server.keepalive) {
-        config.server.keepalive = { mode: 'comment' };
-    } else {
-        if (config.server.keepalive.mode === undefined) config.server.keepalive.mode = 'comment';
-        if (!['comment', 'content'].includes(config.server.keepalive.mode)) {
-            logger.warn('配置器', `无效的 keepalive.mode: ${config.server.keepalive.mode}，使用默认值 comment`);
-            config.server.keepalive.mode = 'comment';
-        }
-    }
-
     // 设置 browser 配置默认值
     if (!config.browser) config.browser = {};
     if (config.browser.humanizeCursor === undefined) {
@@ -279,12 +265,6 @@ export function loadConfig() {
     if (config.backend.pool.failover.maxRetries === undefined) {
         config.backend.pool.failover.maxRetries = 2;
     }
-    if (config.backend.pool.failover.imgDlRetry === undefined) {
-        config.backend.pool.failover.imgDlRetry = false;
-    }
-    if (config.backend.pool.failover.imgDlRetryMaxRetries === undefined) {
-        config.backend.pool.failover.imgDlRetryMaxRetries = 2;
-    }
 
     // 校验 instances 配置
     if (!config.backend.pool.instances || !Array.isArray(config.backend.pool.instances)) {
@@ -303,12 +283,10 @@ export function loadConfig() {
     // 设置队列配置默认值
     if (!config.queue) {
         config.queue = {
-            queueBuffer: 2,
-            imageLimit: 5
+            queueBuffer: 2
         };
     } else {
         if (config.queue.queueBuffer === undefined) config.queue.queueBuffer = 2;
-        if (config.queue.imageLimit === undefined) config.queue.imageLimit = 5;
     }
 
     // maxConcurrent 动态计算：等于 Workers 数量
@@ -328,8 +306,6 @@ export function loadConfig() {
     logger.debug('配置器', `已加载配置文件: ${configPath}`);
     logger.debug('配置器', `Instances: ${config.backend.pool.instances.length}, Workers: ${config.backend.pool.workers.length}`);
     logger.debug('配置器', `调度策略: ${config.backend.pool.strategy}`);
-    logger.debug('配置器', `流式心跳模式: ${config.server.keepalive.mode}`);
-
     // 缓存配置
     cachedConfig = config;
     return config;

@@ -1,486 +1,146 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useSettingsStore } from '@/stores/settings';
+import { message, Modal } from 'ant-design-vue';
 import {
     ReloadOutlined,
     DeleteOutlined,
-    DownloadOutlined,
     EyeOutlined,
     CheckCircleOutlined,
     CloseCircleOutlined,
     ClockCircleOutlined,
-    PictureOutlined,
-    PlayCircleOutlined,
-    FileTextOutlined,
     RocketOutlined,
-    RedoOutlined,
-    InboxOutlined,
-    LoadingOutlined,
-    CopyOutlined
+    CopyOutlined,
+    RedoOutlined
 } from '@ant-design/icons-vue';
-import { message, Modal } from 'ant-design-vue';
+import SchemaField from './SchemaField.vue';
 
 const settingsStore = useSettingsStore();
 
-// 数据状态
 const loading = ref(false);
 const records = ref([]);
 const total = ref(0);
 const page = ref(1);
-const pageSize = ref(50);
-
-// 筛选状态
-const dateRange = ref([]);
+const pageSize = ref(20);
 const statusFilter = ref('all');
-const modelFilter = ref('');
+const adapterFilter = ref('');
 const searchText = ref('');
-const modelOptions = ref([]);
-
-// 多选状态
-const selectedRowKeys = ref([]);
-const selectedRows = ref([]);
-
-// 统计摘要
-const stats = ref({ total: 0, success: 0, failed: 0, avgDuration: 0 });
-
-// 详情抽屉
 const drawerVisible = ref(false);
 const currentRecord = ref(null);
 const detailLoading = ref(false);
-
-// 快速预览弹窗
 const previewModalVisible = ref(false);
 const previewContent = ref('');
-const previewMediaType = ref('text'); // text, image, video
-const previewMediaUrl = ref('');
-const previewTitle = ref('快速预览');
+const previewTitle = ref('预览');
+const selectedAdapterId = ref('');
+const formValue = ref({});
+const sending = ref(false);
+const latestResponse = ref(null);
+const latestError = ref('');
+const autoRefreshEnabled = ref(true);
 
-// 媒体数据缓存 (blob URLs)
-const mediaCache = ref({});
+let autoRefreshInterval = null;
+let searchTimeout = null;
 
-// 发送请求相关
-const sendModelList = ref([]);
-const sendModelCapabilities = ref({});
-const sendModel = ref('');
-const sendPrompt = ref('');
-const sendImageList = ref([]);
-const sendStreamMode = ref(false);
-const sendReasoningMode = ref(true);
-
-const currentSendModelMeta = computed(() => sendModelCapabilities.value[sendModel.value] || null);
-
-// 当前模型是否支持图片输入
-const currentModelSupportsImage = computed(() => {
-    const providerTypes = currentSendModelMeta.value?.providerTypes || [];
-    return providerTypes.includes('openai-images-edits') || providerTypes.includes('openai-chat-completions');
-});
-
-const currentModelSupportsStream = computed(() => {
-    const providerTypes = currentSendModelMeta.value?.providerTypes || [];
-    return providerTypes.includes('openai-chat-completions');
-});
-
-watch(currentModelSupportsStream, (supported) => {
-    if (!supported) {
-        sendStreamMode.value = false;
-        sendReasoningMode.value = false;
-    }
-});
-
-function buildSendModelCapabilities(adaptersMeta) {
-    const capabilities = {};
-
-    for (const adapter of adaptersMeta || []) {
-        if (adapter.valid === false) continue;
-        for (const provider of adapter.providers || []) {
-            for (const modelId of provider.models || []) {
-                if (!capabilities[modelId]) {
-                    capabilities[modelId] = {
-                        providerTypes: [],
-                        adapterIds: []
-                    };
-                }
-
-                if (!capabilities[modelId].providerTypes.includes(provider.type)) {
-                    capabilities[modelId].providerTypes.push(provider.type);
-                }
-                if (!capabilities[modelId].adapterIds.includes(adapter.id)) {
-                    capabilities[modelId].adapterIds.push(adapter.id);
-                }
-            }
-        }
-    }
-
-    return capabilities;
+function deepClone(value) {
+    return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
-// 自动刷新
-let autoRefreshInterval = null;
+function inferSchemaType(schema) {
+    if (schema?.type) return schema.type;
+    if (schema?.enum) return 'string';
+    if (schema?.properties) return 'object';
+    if (schema?.items) return 'array';
+    return 'string';
+}
 
-// 移动端检测
-const isMobile = ref(window.innerWidth <= 768);
-let resizeHandler = null;
+function isFileObjectSchema(schema) {
+    if (!schema || inferSchemaType(schema) !== 'object') return false;
+    const properties = schema.properties || {};
+    return 'fileName' in properties && 'mimeType' in properties && 'base64' in properties;
+}
 
-// 状态配置
-const statusConfig = {
-    success: { color: '#52c41a', text: '成功', icon: CheckCircleOutlined },
-    failed: { color: '#ff4d4f', text: '失败', icon: CloseCircleOutlined },
-    pending: { color: '#faad14', text: '处理中', icon: ClockCircleOutlined }
-};
+function isMultiFileSchema(schema) {
+    return schema?.['x-ui'] === 'files' || (inferSchemaType(schema) === 'array' && isFileObjectSchema(schema.items));
+}
 
-// 获取历史列表
-const fetchHistory = async () => {
-    loading.value = true;
-    try {
-        const params = new URLSearchParams({
-            page: page.value,
-            pageSize: pageSize.value
-        });
+function buildDefaultValue(schema) {
+    if (!schema) return null;
+    if (schema.default !== undefined) return deepClone(schema.default);
+    if (schema.enum?.length) return schema.enum[0];
 
-        if (statusFilter.value && statusFilter.value !== 'all') {
-            params.append('status', statusFilter.value);
-        }
-        if (modelFilter.value) {
-            params.append('model', modelFilter.value);
-        }
-        if (searchText.value) {
-            params.append('search', searchText.value);
-        }
-        if (dateRange.value && dateRange.value.length === 2) {
-            params.append('startDate', dateRange.value[0].format('YYYY-MM-DD'));
-            params.append('endDate', dateRange.value[1].format('YYYY-MM-DD'));
-        }
-
-        const res = await fetch(`/admin/history?${params.toString()}`, {
-            headers: settingsStore.getHeaders()
-        });
-        if (res.ok) {
-            const data = await res.json();
-            records.value = data.items || [];
-            total.value = data.total || 0;
-            // 预加载缩略图
-            preloadThumbnails();
-        }
-    } catch (e) {
-        message.error('获取历史记录失败');
-    } finally {
-        loading.value = false;
-    }
-};
-
-// 预加载列表中的缩略图
-const preloadThumbnails = async () => {
-    for (const record of records.value) {
-        if (record.responseMedia && record.responseMedia.length > 0) {
-            const media = record.responseMedia[0];
-            if (media.localPath && media.status === 'downloaded') {
-                await getMediaBlobUrl(media);
+    const schemaType = inferSchemaType(schema);
+    if (schema?.['x-ui'] === 'file' || isFileObjectSchema(schema)) return null;
+    if (isMultiFileSchema(schema)) return [];
+    if (schemaType === 'object') {
+        const result = {};
+        for (const [key, childSchema] of Object.entries(schema.properties || {})) {
+            if (childSchema.default !== undefined || (schema.required || []).includes(key)) {
+                result[key] = buildDefaultValue(childSchema);
             }
         }
+        return result;
     }
-};
+    if (schemaType === 'array') return [];
+    if (schemaType === 'boolean') return false;
+    if (schemaType === 'number' || schemaType === 'integer') return 0;
+    return '';
+}
 
-// 获取统计摘要
-const fetchStats = async () => {
-    try {
-        const params = new URLSearchParams();
-        if (dateRange.value && dateRange.value.length === 2) {
-            params.append('startDate', dateRange.value[0].format('YYYY-MM-DD'));
-            params.append('endDate', dateRange.value[1].format('YYYY-MM-DD'));
-        }
+const adapters = computed(() => settingsStore.adaptersMeta.filter(item => item.valid !== false));
+const adapterOptions = computed(() => adapters.value.map(item => ({ label: item.name || item.id, value: item.id })));
+const selectedAdapter = computed(() => adapters.value.find(item => item.id === selectedAdapterId.value) || null);
+const adapterEndpoint = computed(() => selectedAdapter.value?.endpoint || (selectedAdapter.value ? `/api/${selectedAdapter.value.id}` : ''));
+const adapterInputSchema = computed(() => selectedAdapter.value?.inputJsonSchema || null);
+const adapterOutputSchema = computed(() => selectedAdapter.value?.outputJsonSchema || null);
 
-        const res = await fetch(`/admin/history/stats?${params.toString()}`, {
-            headers: settingsStore.getHeaders()
-        });
-        if (res.ok) {
-            stats.value = await res.json();
-        }
-    } catch (e) {
-        console.error('获取统计失败', e);
-    }
-};
+const historyColumns = [
+    { title: '状态', dataIndex: 'status', key: 'status', width: 80, align: 'center' },
+    { title: '接口', dataIndex: 'adapter_id', key: 'adapter_id', width: 150 },
+    { title: '请求', dataIndex: 'request_summary', key: 'request_summary', width: 260 },
+    { title: '响应', dataIndex: 'response_summary', key: 'response_summary', width: 320 },
+    { title: '时间', dataIndex: 'created_at', key: 'created_at', width: 140 },
+    { title: '耗时', dataIndex: 'duration_ms', key: 'duration_ms', width: 80, align: 'right' },
+    { title: '', key: 'action', width: 120, align: 'center', fixed: 'right' }
+];
 
-// 获取模型列表
-const fetchModels = async () => {
-    try {
-        const res = await fetch('/admin/history/models', {
-            headers: settingsStore.getHeaders()
-        });
-        if (res.ok) {
-            modelOptions.value = await res.json();
-        }
-    } catch (e) {
-        console.error('获取模型列表失败', e);
-    }
-};
-
-// 查看详情
-const viewDetail = async (record) => {
-    drawerVisible.value = true;
-    detailLoading.value = true;
-    try {
-        const res = await fetch(`/admin/history/${record.id}`, {
-            headers: settingsStore.getHeaders()
-        });
-        if (res.ok) {
-            currentRecord.value = await res.json();
-            // 预加载详情中的媒体
-            if (currentRecord.value.responseMedia) {
-                for (const media of currentRecord.value.responseMedia) {
-                    if (media.localPath && media.status === 'downloaded') {
-                        await getMediaBlobUrl(media);
-                    }
-                }
-            }
-        }
-    } catch (e) {
-        message.error('获取详情失败');
-    } finally {
-        detailLoading.value = false;
-    }
-};
-
-// 获取媒体 Blob URL（带认证）
-const getMediaBlobUrl = async (media) => {
-    if (!media.localPath) return null;
-
-    const filename = media.localPath.split('/').pop();
-    const cacheKey = filename;
-
-    // 检查缓存
-    if (mediaCache.value[cacheKey]) {
-        return mediaCache.value[cacheKey];
-    }
-
-    try {
-        const res = await fetch(`/admin/history/media/${filename}`, {
-            headers: settingsStore.getHeaders()
-        });
-        if (res.ok) {
-            const blob = await res.blob();
-            const blobUrl = URL.createObjectURL(blob);
-            mediaCache.value[cacheKey] = blobUrl;
-            return blobUrl;
-        }
-    } catch (e) {
-        console.error('获取媒体失败', e);
-    }
-    return null;
-};
-
-// 获取缓存的 blob URL
-const getCachedMediaUrl = (media) => {
-    if (!media || !media.localPath) return null;
-    const filename = media.localPath.split('/').pop();
-    return mediaCache.value[filename] || null;
-};
-
-// 重试下载媒体
-const retryMedia = async (recordId, mediaIndex) => {
-    try {
-        const res = await fetch(`/admin/history/${recordId}/retry-media`, {
-            method: 'POST',
-            headers: {
-                ...settingsStore.getHeaders(),
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ mediaIndex })
-        });
-
-        if (res.ok) {
-            message.success('下载成功');
-            fetchHistory();
-            if (currentRecord.value && currentRecord.value.id === recordId) {
-                viewDetail(currentRecord.value);
-            }
-        } else {
-            const data = await res.json();
-            message.error(data.message || '下载失败');
-        }
-    } catch (e) {
-        message.error('请求失败');
-    }
-};
-
-// 删除记录
-const deleteRecords = (ids) => {
-    Modal.confirm({
-        title: '确认删除',
-        content: `确定要删除这 ${ids.length} 条记录吗？关联的媒体文件也会被删除。`,
-        okText: '删除',
-        okType: 'danger',
-        cancelText: '取消',
-        async onOk() {
-            try {
-                const res = await fetch('/admin/history', {
-                    method: 'DELETE',
-                    headers: {
-                        ...settingsStore.getHeaders(),
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ ids })
-                });
-                if (res.ok) {
-                    message.success('删除成功');
-                    clearSelection();
-                    fetchHistory();
-                    fetchStats();
-                } else {
-                    message.error('删除失败');
-                }
-            } catch (e) {
-                message.error('请求失败');
-            }
-        }
-    });
-};
-
-// 按日期范围删除
-const deleteByDateRange = () => {
-    if (!dateRange.value || dateRange.value.length !== 2) {
-        message.warning('请先选择日期范围');
-        return;
-    }
-
-    Modal.confirm({
-        title: '确认删除',
-        content: `确定要删除 ${dateRange.value[0].format('YYYY-MM-DD')} 至 ${dateRange.value[1].format('YYYY-MM-DD')} 的所有记录吗？`,
-        okText: '删除',
-        okType: 'danger',
-        cancelText: '取消',
-        async onOk() {
-            try {
-                const params = new URLSearchParams({
-                    startDate: dateRange.value[0].format('YYYY-MM-DD'),
-                    endDate: dateRange.value[1].format('YYYY-MM-DD')
-                });
-                const res = await fetch(`/admin/history?${params.toString()}`, {
-                    method: 'DELETE',
-                    headers: settingsStore.getHeaders()
-                });
-                if (res.ok) {
-                    const data = await res.json();
-                    message.success(`已删除 ${data.deleted} 条记录`);
-                    clearSelection();
-                    fetchHistory();
-                    fetchStats();
-                } else {
-                    message.error('删除失败');
-                }
-            } catch (e) {
-                message.error('请求失败');
-            }
-        }
-    });
-};
-
-// 格式化时间
-const formatTime = (timestamp) => {
+function formatTime(timestamp) {
     if (!timestamp) return '-';
-    const date = new Date(timestamp);
-    return date.toLocaleString('zh-CN', {
+    return new Date(timestamp).toLocaleString('zh-CN', {
         month: '2-digit',
         day: '2-digit',
         hour: '2-digit',
-        minute: '2-digit'
+        minute: '2-digit',
+        second: '2-digit'
     });
-};
+}
 
-// 格式化耗时
-const formatDuration = (ms) => {
+function formatDuration(ms) {
     if (!ms) return '-';
     if (ms < 1000) return `${ms}ms`;
     return `${(ms / 1000).toFixed(1)}s`;
-};
+}
 
-// 截断文本
-const truncateText = (text, maxLen = 120) => {
+function truncateText(text, maxLen = 140) {
     if (!text) return '-';
-    return text.length > maxLen ? text.substring(0, maxLen) + '...' : text;
-};
+    return text.length > maxLen ? `${text.slice(0, maxLen)}...` : text;
+}
 
-// 判断响应是否有媒体内容
-const hasMedia = (record) => {
-    return record.responseMedia && record.responseMedia.length > 0;
-};
+function getStatusColor(status) {
+    if (status === 'success') return 'success';
+    if (status === 'failed') return 'error';
+    return 'processing';
+}
 
-// 获取第一个媒体
-const getFirstMedia = (record) => {
-    if (!hasMedia(record)) return null;
-    return record.responseMedia[0];
-};
+function resetFormFromSchema() {
+    formValue.value = buildDefaultValue(adapterInputSchema.value || { type: 'object', properties: {} }) || {};
+}
 
-// 表格列定义
-const columns = [
-    {
-        title: '状态',
-        dataIndex: 'status',
-        key: 'status',
-        width: 70,
-        align: 'center'
-    },
-    {
-        title: 'Prompt',
-        dataIndex: 'prompt',
-        key: 'prompt',
-        width: 200
-    },
-    {
-        title: '模型',
-        dataIndex: 'model_name',
-        key: 'model_name',
-        width: 150,
-        ellipsis: true
-    },
-    {
-        title: '响应',
-        key: 'response',
-        width: 220
-    },
-    {
-        title: '媒体',
-        key: 'media',
-        width: 180,
-        align: 'center'
-    },
-    {
-        title: '时间',
-        dataIndex: 'created_at',
-        key: 'created_at',
-        width: 100,
-        customRender: ({ value }) => formatTime(value)
-    },
-    {
-        title: '耗时',
-        dataIndex: 'duration_ms',
-        key: 'duration_ms',
-        width: 60,
-        align: 'right',
-        customRender: ({ value }) => formatDuration(value)
-    },
-    {
-        title: '',
-        key: 'action',
-        width: 100,
-        align: 'center',
-        fixed: 'right'
-    }
-];
-
-// 监听筛选变化
-watch([statusFilter, modelFilter, dateRange], () => {
-    page.value = 1;
-    fetchHistory();
-    fetchStats();
+watch(selectedAdapterId, () => {
+    resetFormFromSchema();
+    latestResponse.value = null;
+    latestError.value = '';
 });
 
-// 切换模型时清空已选图片
-watch(sendModel, () => {
-    sendImageList.value = [];
-});
-
-// 搜索防抖
-let searchTimeout = null;
 watch(searchText, () => {
     if (searchTimeout) clearTimeout(searchTimeout);
     searchTimeout = setTimeout(() => {
@@ -489,1207 +149,407 @@ watch(searchText, () => {
     }, 300);
 });
 
-// 分页变化
-const handleTableChange = (pagination) => {
-    page.value = pagination.current;
-    pageSize.value = pagination.pageSize;
-    clearSelection();
+watch([statusFilter, adapterFilter], () => {
+    page.value = 1;
     fetchHistory();
-};
+});
 
-// 刷新
-const handleRefresh = () => {
-    fetchHistory();
-    fetchModels();
-};
+function buildCurlCommand() {
+    if (!selectedAdapter.value) return '';
+    const tokenHeader = settingsStore.token
+        ? `  -H "Authorization: Bearer ${settingsStore.token}" \\\n+`
+        : '';
+    return `curl -X POST ${window.location.origin}${adapterEndpoint.value} \\
+${tokenHeader}  -H "Content-Type: application/json" \\
+  -d '${JSON.stringify(formValue.value)}'`;
+}
 
-// 快速预览响应内容
-const previewResponse = async (record) => {
-    previewModalVisible.value = true;
-    previewMediaType.value = 'text';
-    previewTitle.value = '响应预览';
-    if (record.status === 'failed') {
-        previewContent.value = record.error_message || '未知错误';
-    } else {
-        previewContent.value = record.response_text || '无响应';
+async function fetchAdapters() {
+    await settingsStore.fetchAdaptersMeta();
+    if (!selectedAdapterId.value && adapters.value.length > 0) {
+        selectedAdapterId.value = adapters.value[0].id;
     }
-};
+}
 
-// 快速预览 Prompt 内容
-const previewPrompt = (record) => {
-    previewModalVisible.value = true;
-    previewMediaType.value = 'text';
-    previewTitle.value = 'Prompt 预览';
-    previewContent.value = record.prompt || '无内容';
-};
-
-// 复制预览内容到剪贴板
-const copyPreviewContent = async () => {
+async function fetchHistory() {
+    loading.value = true;
     try {
-        await navigator.clipboard.writeText(previewContent.value);
-        message.success('已复制到剪贴板');
-    } catch (e) {
-        message.error('复制失败');
-    }
-};
-
-// 快速预览媒体
-const previewMedia = async (record) => {
-    const media = getFirstMedia(record);
-    if (!media) return;
-
-    if (media.type === 'image') {
-        previewMediaType.value = 'image';
-    } else if (media.type === 'video') {
-        previewMediaType.value = 'video';
-    } else {
-        previewMediaType.value = 'text';
-        previewContent.value = media.originalUrl || '无预览';
-        previewModalVisible.value = true;
-        return;
-    }
-
-    if (media.status === 'downloaded') {
-        const url = await getMediaBlobUrl(media);
-        if (url) {
-            previewMediaUrl.value = url;
-            previewModalVisible.value = true;
-        } else {
-            message.error('预览加载失败');
-        }
-    } else {
-        previewContent.value = '媒体未下载或下载失败，请查看详情并重试下载';
-        previewMediaType.value = 'text';
-        previewModalVisible.value = true;
-    }
-};
-
-// 关闭预览弹窗
-const closePreview = () => {
-    previewModalVisible.value = false;
-    previewContent.value = '';
-    previewMediaUrl.value = '';
-    previewMediaType.value = 'text';
-    previewTitle.value = '快速预览';
-};
-
-// 多选变化
-const onSelectChange = (keys, rows) => {
-    selectedRowKeys.value = keys;
-    selectedRows.value = rows;
-};
-
-// 批量删除选中
-const deleteSelected = () => {
-    if (selectedRowKeys.value.length === 0) {
-        message.warning('请先选择要删除的记录');
-        return;
-    }
-    deleteRecords(selectedRowKeys.value);
-};
-
-// 清空选择
-const clearSelection = () => {
-    selectedRowKeys.value = [];
-    selectedRows.value = [];
-};
-
-// === 发送请求功能 ===
-
-// 获取可用模型列表
-const fetchSendModelList = async () => {
-    try {
-        await settingsStore.fetchAdaptersMeta();
-        sendModelCapabilities.value = buildSendModelCapabilities(settingsStore.adaptersMeta);
-
-        const res = await fetch('/v1/models', { headers: settingsStore.getHeaders() });
-        if (res.ok) {
-            const data = await res.json();
-            sendModelList.value = (data.data || []).map(model => ({
-                ...model,
-                providerTypes: sendModelCapabilities.value[model.id]?.providerTypes || []
-            }));
-            if (sendModelList.value.length > 0 && !sendModel.value) {
-                sendModel.value = sendModelList.value[0].id;
-            }
-        }
-    } catch (e) {
-        console.error('获取模型列表失败', e);
-    }
-};
-
-// 图片转 base64
-const fileToBase64 = (file) => {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-    });
-};
-
-// 图片上传前检查
-const beforeUpload = (file) => {
-    const allowedTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-    if (!allowedTypes.includes(file.type)) {
-        message.error('仅支持 PNG, JPEG, GIF, WebP 格式');
-        return false;
-    }
-    if (sendImageList.value.length >= 10) {
-        message.error('最多上传 10 张图片');
-        return false;
-    }
-    return false;
-};
-
-// 处理图片选择
-const handleSendImageChange = async (info) => {
-    const file = info.file;
-    if (file.status === 'removed') {
-        sendImageList.value = sendImageList.value.filter(f => f.uid !== file.uid);
-        return;
-    }
-    try {
-        const base64 = await fileToBase64(file.originFileObj || file);
-        sendImageList.value.push({ uid: file.uid, name: file.name, base64 });
-    } catch (e) {
-        message.error('图片读取失败');
-    }
-};
-
-const resolveSendProviderType = () => {
-    const providerTypes = currentSendModelMeta.value?.providerTypes || [];
-    const hasImages = sendImageList.value.length > 0;
-
-    if (hasImages && providerTypes.includes('openai-images-edits')) {
-        return 'openai-images-edits';
-    }
-    if (!hasImages && providerTypes.includes('openai-images-generations')) {
-        return 'openai-images-generations';
-    }
-    if (providerTypes.includes('openai-chat-completions')) {
-        return 'openai-chat-completions';
-    }
-
-    return null;
-};
-
-const buildSendRequestPayload = (providerType) => {
-    if (providerType === 'openai-images-generations') {
-        return {
-            endpoint: '/v1/images/generations',
-            body: {
-                model: sendModel.value,
-                prompt: sendPrompt.value,
-                response_format: 'url'
-            }
-        };
-    }
-
-    if (providerType === 'openai-images-edits') {
-        return {
-            endpoint: '/v1/images/edits',
-            body: {
-                model: sendModel.value,
-                prompt: sendPrompt.value,
-                images: sendImageList.value.map(img => img.base64),
-                response_format: 'url'
-            }
-        };
-    }
-
-    let content;
-    if (sendImageList.value.length > 0) {
-        content = [{ type: 'text', text: sendPrompt.value }];
-        for (const img of sendImageList.value) {
-            content.push({ type: 'image_url', image_url: { url: img.base64 } });
-        }
-    } else {
-        content = sendPrompt.value;
-    }
-
-    const body = {
-        model: sendModel.value,
-        messages: [{ role: 'user', content }],
-        stream: sendStreamMode.value
-    };
-    if (sendReasoningMode.value) {
-        body.reasoning = true;
-    }
-
-    return {
-        endpoint: '/v1/chat/completions',
-        body
-    };
-};
-
-const dispatchRequestInBackground = async (endpoint, body) => {
-    try {
-        const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { ...settingsStore.getHeaders(), 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
+        const params = new URLSearchParams({
+            page: String(page.value),
+            pageSize: String(pageSize.value)
         });
-
-        if (!res.ok) {
-            let errMsg = `请求失败: ${res.status}`;
-            try {
-                const data = await res.json();
-                errMsg = data.error?.message || data.message || errMsg;
-            } catch { }
-            message.error(errMsg);
-            await silentFetchHistory();
-            await silentFetchStats();
-        }
-    } catch (e) {
-        message.error(`无法连接后端服务: ${e.message}`);
-        await silentFetchHistory();
-        await silentFetchStats();
-    }
-};
-
-// 发送请求（fire-and-forget，立即回到可编辑状态）
-const sendRequest = async () => {
-    if (!sendModel.value) {
-        message.warning('请选择模型');
-        return;
-    }
-    if (!sendPrompt.value.trim()) {
-        message.warning('请输入提示词');
-        return;
-    }
-
-    const providerType = resolveSendProviderType();
-    if (!providerType) {
-        message.error('当前模型没有可用的 provider 路由，请先确认适配器脚本已加载');
-        return;
-    }
-
-    const { endpoint, body } = buildSendRequestPayload(providerType);
-
-    dispatchRequestInBackground(endpoint, body);
-    message.success('请求已发送');
-
-    // 清空输入，允许立即发下一个
-    sendPrompt.value = '';
-    sendImageList.value = [];
-
-    // 启动自动刷新，并尽快刷新一次让新任务显示出来
-    startAutoRefresh();
-    setTimeout(() => {
-        silentFetchHistory();
-        silentFetchStats();
-    }, 500);
-};
-
-// 静默删除记录（不弹确认框）
-const silentDeleteRecord = async (id) => {
-    try {
-        await fetch('/admin/history', {
-            method: 'DELETE',
-            headers: {
-                ...settingsStore.getHeaders(),
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ ids: [id] })
-        });
-    } catch (e) { /* 静默失败 */ }
-};
-
-// 从历史记录重发
-const resendFromRecord = (record) => {
-    const modelId = record.model_id || record.model_name;
-    if (modelId) {
-        sendModel.value = modelId;
-    }
-    if (record.prompt) {
-        sendPrompt.value = record.prompt;
-    }
-    sendImageList.value = [];
-
-    // 如果原记录是失败状态（没有生成回复或图片），重发后删除旧记录
-    const shouldDelete = record.status === 'failed';
-
-    sendRequest();
-
-    if (shouldDelete) {
-        silentDeleteRecord(record.id);
-    }
-};
-
-// === 自动刷新 ===
-const silentFetchHistory = async () => {
-    try {
-        const params = new URLSearchParams({ page: page.value, pageSize: pageSize.value });
         if (statusFilter.value && statusFilter.value !== 'all') params.append('status', statusFilter.value);
-        if (modelFilter.value) params.append('model', modelFilter.value);
+        if (adapterFilter.value) params.append('adapter', adapterFilter.value);
         if (searchText.value) params.append('search', searchText.value);
-        if (dateRange.value && dateRange.value.length === 2) {
-            params.append('startDate', dateRange.value[0].format('YYYY-MM-DD'));
-            params.append('endDate', dateRange.value[1].format('YYYY-MM-DD'));
-        }
         const res = await fetch(`/admin/history?${params.toString()}`, { headers: settingsStore.getHeaders() });
         if (res.ok) {
             const data = await res.json();
             records.value = data.items || [];
             total.value = data.total || 0;
-            preloadThumbnails();
         }
-    } catch (e) { /* 静默失败 */ }
-};
+    } catch (e) {
+        message.error(`获取历史失败: ${e.message}`);
+    } finally {
+        loading.value = false;
+    }
+}
 
-const silentFetchStats = async () => {
-    try {
-        const params = new URLSearchParams();
-        if (dateRange.value && dateRange.value.length === 2) {
-            params.append('startDate', dateRange.value[0].format('YYYY-MM-DD'));
-            params.append('endDate', dateRange.value[1].format('YYYY-MM-DD'));
-        }
-        const res = await fetch(`/admin/history/stats?${params.toString()}`, { headers: settingsStore.getHeaders() });
-        if (res.ok) { stats.value = await res.json(); }
-    } catch (e) { /* 静默失败 */ }
-};
-
-const startAutoRefresh = () => {
+function startAutoRefresh() {
     if (autoRefreshInterval) return;
     autoRefreshInterval = setInterval(() => {
-        silentFetchHistory();
-        silentFetchStats();
+        if (autoRefreshEnabled.value) {
+            fetchHistory();
+        }
     }, 3000);
-};
+}
 
-const stopAutoRefresh = () => {
+function stopAutoRefresh() {
     if (autoRefreshInterval) {
         clearInterval(autoRefreshInterval);
         autoRefreshInterval = null;
     }
-};
+}
 
-onMounted(() => {
-    resizeHandler = () => { isMobile.value = window.innerWidth <= 768; };
-    window.addEventListener('resize', resizeHandler);
+async function sendRequest() {
+    if (!selectedAdapter.value) {
+        message.warning('请先选择适配器');
+        return;
+    }
+
+    sending.value = true;
+    latestResponse.value = null;
+    latestError.value = '';
+    try {
+        const res = await fetch(adapterEndpoint.value, {
+            method: 'POST',
+            headers: settingsStore.getHeaders(),
+            body: JSON.stringify(formValue.value)
+        });
+
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            latestError.value = payload.error?.message || payload.message || `HTTP ${res.status}`;
+            message.error(latestError.value);
+        } else {
+            latestResponse.value = payload;
+            message.success('请求成功');
+        }
+
+        await fetchHistory();
+    } catch (e) {
+        latestError.value = e.message;
+        message.error(`请求失败: ${e.message}`);
+    } finally {
+        sending.value = false;
+    }
+}
+
+function previewText(title, content) {
+    previewTitle.value = title;
+    previewContent.value = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+    previewModalVisible.value = true;
+}
+
+async function viewDetail(record) {
+    drawerVisible.value = true;
+    detailLoading.value = true;
+    try {
+        const res = await fetch(`/admin/history/${record.id}`, { headers: settingsStore.getHeaders() });
+        if (res.ok) {
+            currentRecord.value = await res.json();
+        }
+    } catch (e) {
+        message.error(`获取详情失败: ${e.message}`);
+    } finally {
+        detailLoading.value = false;
+    }
+}
+
+function deleteRecord(record) {
+    Modal.confirm({
+        title: '确认删除',
+        content: `确定要删除记录 ${record.id} 吗？`,
+        okText: '删除',
+        okType: 'danger',
+        cancelText: '取消',
+        async onOk() {
+            const res = await fetch('/admin/history', {
+                method: 'DELETE',
+                headers: settingsStore.getHeaders(),
+                body: JSON.stringify({ ids: [record.id] })
+            });
+            if (res.ok) {
+                message.success('删除成功');
+                await fetchHistory();
+            }
+        }
+    });
+}
+
+function resendRecord(record) {
+    if (!record.request_body || !record.adapter_id) {
+        message.warning('该记录缺少可重发的请求体');
+        return;
+    }
+    selectedAdapterId.value = record.adapter_id;
+    formValue.value = deepClone(record.request_body);
+}
+
+async function copyText(content) {
+    try {
+        await navigator.clipboard.writeText(typeof content === 'string' ? content : JSON.stringify(content, null, 2));
+        message.success('已复制到剪贴板');
+    } catch (e) {
+        message.error(`复制失败: ${e.message}`);
+    }
+}
+
+function handleTableChange(pagination) {
+    page.value = pagination.current;
+    pageSize.value = pagination.pageSize;
     fetchHistory();
-    fetchStats();
-    fetchModels();
-    fetchSendModelList();
+}
+
+onMounted(async () => {
+    await Promise.all([fetchAdapters(), fetchHistory()]);
     startAutoRefresh();
 });
 
 onUnmounted(() => {
     stopAutoRefresh();
-    if (resizeHandler) window.removeEventListener('resize', resizeHandler);
+    if (searchTimeout) clearTimeout(searchTimeout);
 });
 </script>
 
 <template>
-    <!-- 发送请求 -->
-    <a-card title="发送请求" :bordered="false" style="margin-bottom: 24px">
-        <div style="display: flex; gap: 16px; flex-wrap: wrap;">
-            <!-- 左侧：模型 + 提示词 -->
-            <div style="flex: 1; min-width: 280px;">
-                <!-- 模型选择 -->
-                <div style="margin-bottom: 12px;">
-                    <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 4px;">模型</div>
-                    <a-select v-model:value="sendModel" style="width: 100%" size="small" placeholder="选择模型" show-search>
-                        <a-select-option v-for="model in sendModelList" :key="model.id" :value="model.id">
-                            {{ model.id }}
-                        </a-select-option>
-                    </a-select>
+    <a-card title="适配器调用" :bordered="false" style="margin-bottom: 24px;">
+        <a-row :gutter="16">
+            <a-col :xs="24" :lg="8">
+                <div style="margin-bottom: 16px;">
+                    <div class="label">适配器</div>
+                    <a-select v-model:value="selectedAdapterId" style="width: 100%" :options="adapterOptions" placeholder="选择适配器" />
                 </div>
-
-                <!-- 提示词 -->
-                <div style="margin-bottom: 12px;">
-                    <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 4px;">提示词</div>
-                    <a-textarea v-model:value="sendPrompt" placeholder="输入提示词" :rows="3" size="small" />
+                <div v-if="selectedAdapter" class="meta-box">
+                    <div><strong>名称：</strong>{{ selectedAdapter.name }}</div>
+                    <div><strong>接口：</strong><code>{{ adapterEndpoint }}</code></div>
                 </div>
-
-                <!-- 选项 + 发送按钮 -->
-                <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
-                    <a-checkbox v-model:checked="sendStreamMode" :disabled="!currentModelSupportsStream">流式响应</a-checkbox>
-                    <a-checkbox v-model:checked="sendReasoningMode">返回思考</a-checkbox>
-                    <a-button type="primary" @click="sendRequest" :disabled="!sendModel">
-                        <template #icon><RocketOutlined /></template>
-                        发送
+                <div style="margin-top: 16px;">
+                    <div class="label">curl 示例（基于当前表单值）</div>
+                    <pre class="json-box">{{ buildCurlCommand() }}</pre>
+                    <a-button size="small" @click="copyText(buildCurlCommand())">
+                        <template #icon><CopyOutlined /></template>
+                        复制 curl
                     </a-button>
                 </div>
-            </div>
+            </a-col>
 
-            <!-- 右侧：图片上传（仅支持图片的模型显示） -->
-            <div v-if="currentModelSupportsImage" class="send-upload-area">
-                <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 4px;">
-                    附加图片 ({{ sendImageList.length }}/10)
-                </div>
-                <a-upload-dragger :file-list="[]" :multiple="true" :before-upload="beforeUpload"
-                    @change="handleSendImageChange" accept=".png,.jpg,.jpeg,.gif,.webp" :show-upload-list="false">
-                    <p style="margin: 0;">
-                        <InboxOutlined style="font-size: 20px; color: #1890ff;" />
-                    </p>
-                    <p style="font-size: 12px; margin: 2px 0 0 0; color: #8c8c8c;">
-                        点击或拖拽上传图片
-                    </p>
-                </a-upload-dragger>
-                <div v-if="sendImageList.length > 0" style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px;">
-                    <a-tag v-for="img in sendImageList" :key="img.uid" closable
-                        @close="sendImageList = sendImageList.filter(i => i.uid !== img.uid)">
-                        <PictureOutlined /> {{ img.name.slice(0, 15) }}{{ img.name.length > 15 ? '...' : '' }}
-                    </a-tag>
-                </div>
-            </div>
-        </div>
+            <a-col :xs="24" :lg="16">
+                <a-alert
+                    type="info"
+                    show-icon
+                    style="margin-bottom: 16px;"
+                    message="固定调用方式为 POST /api/{adapter_id}，表单完全由适配器的 inputJsonSchema 驱动。"
+                />
+                <template v-if="adapterInputSchema">
+                    <SchemaField :schema="adapterInputSchema" field-key="input" :model-value="formValue" @update:model-value="value => formValue = value" />
+                    <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                        <a-button @click="resetFormFromSchema">重置</a-button>
+                        <a-button type="primary" :loading="sending" @click="sendRequest">
+                            <template #icon><RocketOutlined /></template>
+                            调用接口
+                        </a-button>
+                    </div>
+                </template>
+                <a-empty v-else description="请选择有效适配器" />
+            </a-col>
+        </a-row>
     </a-card>
 
-    <!-- 统计摘要 -->
-    <a-card title="请求记录" :bordered="false">
-        <template #extra>
-            <a-button type="link" danger size="small" @click="deleteByDateRange"
-                :disabled="!dateRange || dateRange.length !== 2">
-                <template #icon>
-                    <DeleteOutlined />
+    <a-row :gutter="16" style="margin-bottom: 24px;">
+        <a-col :xs="24" :lg="12">
+            <a-card title="最近响应" :bordered="false">
+                <template v-if="latestResponse">
+                    <pre class="json-box">{{ JSON.stringify(latestResponse, null, 2) }}</pre>
                 </template>
-                删除所选范围
-            </a-button>
+                <template v-else-if="latestError">
+                    <pre class="json-box error-box">{{ latestError }}</pre>
+                </template>
+                <a-empty v-else description="暂无调用结果" />
+            </a-card>
+        </a-col>
+        <a-col :xs="24" :lg="12">
+            <a-card title="输出 Schema" :bordered="false">
+                <pre class="json-box">{{ JSON.stringify(adapterOutputSchema, null, 2) }}</pre>
+            </a-card>
+        </a-col>
+    </a-row>
+
+    <a-card title="请求历史" :bordered="false">
+        <template #extra>
+            <a-space>
+                <a-switch v-model:checked="autoRefreshEnabled" checked-children="自动刷新" un-checked-children="手动刷新" />
+                <a-button @click="fetchHistory"><template #icon><ReloadOutlined /></template>刷新</a-button>
+            </a-space>
         </template>
 
-        <div class="stats-content">
-            <a-range-picker v-model:value="dateRange" :format="'YYYY-MM-DD'" :placeholder="['开始日期', '结束日期']"
-                size="small" class="stats-date-picker" />
-
-            <a-divider type="vertical" style="height: 32px; margin: 0 16px" />
-
-            <div class="stats-numbers">
-                <div class="stat-item neutral">
-                    <FileTextOutlined />
-                    <span class="stat-value">{{ stats.total }}</span>
-                    <span class="stat-label">总数</span>
-                </div>
-                <div class="stat-item success">
-                    <CheckCircleOutlined />
-                    <span class="stat-value">{{ stats.success }}</span>
-                    <span class="stat-label">成功</span>
-                </div>
-                <div class="stat-item error">
-                    <CloseCircleOutlined />
-                    <span class="stat-value">{{ stats.failed }}</span>
-                    <span class="stat-label">失败</span>
-                </div>
-                <div class="stat-item neutral">
-                    <ClockCircleOutlined />
-                    <span class="stat-value">{{ formatDuration(stats.avgDuration) }}</span>
-                    <span class="stat-label">平均耗时</span>
-                </div>
-            </div>
-        </div>
-    </a-card>
-
-    <!-- 历史记录表格 -->
-    <a-card :bordered="false" style="margin-top: 24px">
-        <!-- 筛选工具栏 -->
         <div class="toolbar">
-            <div class="toolbar-row">
-                <a-select v-model:value="statusFilter" class="toolbar-status-select" size="small" placeholder="状态">
-                    <a-select-option value="all">全部状态</a-select-option>
-                    <a-select-option value="success">成功</a-select-option>
-                    <a-select-option value="failed">失败</a-select-option>
-                    <a-select-option value="pending">处理中</a-select-option>
-                </a-select>
-                <a-select v-model:value="modelFilter" class="toolbar-model-select" size="small" placeholder="全部模型"
-                    allow-clear show-search>
-                    <a-select-option v-for="model in modelOptions" :key="model" :value="model">
-                        {{ model }}
-                    </a-select-option>
-                </a-select>
-                <a-button size="small" @click="handleRefresh">
-                    <template #icon>
-                        <ReloadOutlined />
-                    </template>
-                </a-button>
-                <a-button v-if="selectedRowKeys.length > 0" type="primary" danger size="small" @click="deleteSelected">
-                    <template #icon>
-                        <DeleteOutlined />
-                    </template>
-                    删除选中 ({{ selectedRowKeys.length }})
-                </a-button>
-            </div>
-            <div class="toolbar-row">
-                <a-input-search v-model:value="searchText" placeholder="搜索 Prompt 或响应内容" size="small"
-                    allow-clear style="width: 100%;" />
-            </div>
+            <a-select v-model:value="statusFilter" style="width: 140px" size="small">
+                <a-select-option value="all">全部状态</a-select-option>
+                <a-select-option value="success">成功</a-select-option>
+                <a-select-option value="failed">失败</a-select-option>
+                <a-select-option value="pending">处理中</a-select-option>
+            </a-select>
+            <a-select v-model:value="adapterFilter" style="width: 180px" size="small" allow-clear placeholder="全部适配器">
+                <a-select-option v-for="item in adapterOptions" :key="item.value" :value="item.value">{{ item.label }}</a-select-option>
+            </a-select>
+            <a-input-search v-model:value="searchText" style="max-width: 280px" size="small" allow-clear placeholder="搜索请求或响应摘要" />
         </div>
 
-        <!-- 表格 -->
         <a-table
-            :columns="columns"
+            :columns="historyColumns"
             :data-source="records"
             :loading="loading"
-            :row-selection="{
-                selectedRowKeys: selectedRowKeys,
-                onChange: onSelectChange,
-                columnWidth: 40
-            }"
-            :pagination="{
-                current: page,
-                pageSize: pageSize,
-                total: total,
-                showSizeChanger: true,
-                showQuickJumper: true,
-                showTotal: (total) => `共 ${total} 条`,
-                pageSizeOptions: ['20', '50', '100', '200']
-            }"
             row-key="id"
             size="small"
-            :scroll="{ x: 1000 }"
+            :pagination="{
+                current: page,
+                pageSize,
+                total,
+                showSizeChanger: true,
+                showQuickJumper: true,
+                showTotal: total => `共 ${total} 条`
+            }"
+            :scroll="{ x: 1100 }"
             @change="handleTableChange"
         >
             <template #bodyCell="{ column, record }">
-                <!-- Prompt 列：支持多行，点击弹出预览 -->
-                <template v-if="column.key === 'prompt'">
-                    <div class="multiline-text clickable" @click="previewPrompt(record)" title="点击查看完整内容">
-                        {{ truncateText(record.prompt, 120) }}
+                <template v-if="column.key === 'status'">
+                    <a-tag :color="getStatusColor(record.status)">{{ record.status }}</a-tag>
+                </template>
+                <template v-else-if="column.key === 'adapter_id'">
+                    <div>
+                        <div><code>{{ record.endpoint_path || `/api/${record.adapter_id}` }}</code></div>
+                        <div style="font-size: 12px; color: #8c8c8c;">{{ record.adapter_id || '-' }}</div>
                     </div>
                 </template>
-
-                <!-- 响应列 -->
-                <template v-else-if="column.key === 'response'">
-                    <div v-if="record.status === 'failed'" class="multiline-text error-text clickable"
-                        @click="previewResponse(record)" title="点击查看完整内容">
-                        {{ truncateText(record.error_message, 120) || '错误' }}
-                    </div>
-                    <div v-else class="multiline-text response-text clickable"
-                        @click="previewResponse(record)" title="点击查看完整内容">
-                        {{ truncateText(record.response_text, 120) || '-' }}
+                <template v-else-if="column.key === 'request_summary'">
+                    <div class="multiline-text clickable" @click="previewText('请求体预览', record.request_body || record.request_summary)">
+                        {{ truncateText(record.request_summary, 160) }}
                     </div>
                 </template>
-
-                <!-- 媒体列：显示缩略图 -->
-                <template v-else-if="column.key === 'media'">
-                    <div v-if="hasMedia(record)" class="media-thumb-cell" @click="previewMedia(record)" title="点击查看大图">
-                        <template v-if="getFirstMedia(record).status === 'downloaded'">
-                            <img
-                                v-if="getFirstMedia(record).type === 'image'"
-                                :src="getCachedMediaUrl(getFirstMedia(record))"
-                                class="thumb-img"
-                                loading="lazy"
-                            />
-                            <div v-else-if="getFirstMedia(record).type === 'video'" class="thumb-video">
-                                <PlayCircleOutlined />
-                            </div>
-                        </template>
-                        <div v-else class="thumb-placeholder">
-                            <PictureOutlined v-if="getFirstMedia(record).type === 'image'" />
-                            <PlayCircleOutlined v-else />
-                        </div>
-                        <span v-if="record.responseMedia.length > 1" class="media-count">
-                            +{{ record.responseMedia.length - 1 }}
-                        </span>
+                <template v-else-if="column.key === 'response_summary'">
+                    <div class="multiline-text clickable" :class="{ 'error-text': record.status === 'failed' }" @click="previewText('响应预览', record.status === 'failed' ? record.error_message : (record.response_body || record.response_summary))">
+                        {{ truncateText(record.status === 'failed' ? record.error_message : record.response_summary, 180) }}
                     </div>
-                    <span v-else class="no-media">-</span>
                 </template>
-
-                <!-- 状态列 -->
-                <template v-else-if="column.key === 'status'">
-                    <a-tag :color="statusConfig[record.status]?.color || '#8c8c8c'" size="small">
-                        {{ statusConfig[record.status]?.text || record.status }}
-                    </a-tag>
+                <template v-else-if="column.key === 'created_at'">
+                    {{ formatTime(record.created_at) }}
                 </template>
-
-                <!-- 操作列 -->
+                <template v-else-if="column.key === 'duration_ms'">
+                    {{ formatDuration(record.duration_ms) }}
+                </template>
                 <template v-else-if="column.key === 'action'">
                     <a-space :size="0">
-                        <a-tooltip title="重发">
-                            <a-button type="link" size="small" @click="resendFromRecord(record)">
-                                <template #icon>
-                                    <RedoOutlined />
-                                </template>
-                            </a-button>
-                        </a-tooltip>
-                        <a-tooltip title="详情">
-                            <a-button type="link" size="small" @click="viewDetail(record)">
-                                <template #icon>
-                                    <EyeOutlined />
-                                </template>
-                            </a-button>
-                        </a-tooltip>
-                        <a-tooltip title="删除">
-                            <a-button type="link" size="small" danger @click="deleteRecords([record.id])">
-                                <template #icon>
-                                    <DeleteOutlined />
-                                </template>
-                            </a-button>
-                        </a-tooltip>
+                        <a-button type="link" size="small" @click="resendRecord(record)">
+                            <template #icon><RedoOutlined /></template>
+                        </a-button>
+                        <a-button type="link" size="small" @click="viewDetail(record)">
+                            <template #icon><EyeOutlined /></template>
+                        </a-button>
+                        <a-button type="link" size="small" danger @click="deleteRecord(record)">
+                            <template #icon><DeleteOutlined /></template>
+                        </a-button>
                     </a-space>
                 </template>
             </template>
         </a-table>
     </a-card>
 
-    <!-- 详情抽屉 -->
-    <a-drawer v-model:open="drawerVisible" title="请求详情" placement="right" :width="isMobile ? '100%' : 700" :destroy-on-close="true">
+    <a-drawer v-model:open="drawerVisible" title="请求详情" placement="right" width="720">
         <a-spin :spinning="detailLoading">
             <template v-if="currentRecord">
-                <!-- 基本信息 -->
-                <a-descriptions :column="isMobile ? 1 : 2" size="small" bordered>
-                    <a-descriptions-item label="请求 ID" :span="2">
-                        <code>{{ currentRecord.id }}</code>
-                    </a-descriptions-item>
-                    <a-descriptions-item label="时间">
-                        {{ new Date(currentRecord.created_at).toLocaleString('zh-CN') }}
-                    </a-descriptions-item>
+                <a-descriptions :column="1" size="small" bordered>
+                    <a-descriptions-item label="请求 ID"><code>{{ currentRecord.id }}</code></a-descriptions-item>
+                    <a-descriptions-item label="适配器">{{ currentRecord.adapter_id }}</a-descriptions-item>
+                    <a-descriptions-item label="接口路径"><code>{{ currentRecord.endpoint_path }}</code></a-descriptions-item>
                     <a-descriptions-item label="状态">
-                        <a-tag :color="statusConfig[currentRecord.status]?.color">
-                            {{ statusConfig[currentRecord.status]?.text || currentRecord.status }}
-                        </a-tag>
+                        <a-tag :color="getStatusColor(currentRecord.status)">{{ currentRecord.status }}</a-tag>
                     </a-descriptions-item>
-                    <a-descriptions-item label="模型" :span="2">
-                        {{ currentRecord.model_name || currentRecord.model_id || '-' }}
-                    </a-descriptions-item>
-                    <a-descriptions-item label="耗时">
-                        {{ formatDuration(currentRecord.duration_ms) }}
-                    </a-descriptions-item>
-                    <a-descriptions-item label="流式">
-                        {{ currentRecord.isStreaming ? '是' : '否' }}
-                    </a-descriptions-item>
+                    <a-descriptions-item label="时间">{{ formatTime(currentRecord.created_at) }}</a-descriptions-item>
+                    <a-descriptions-item label="耗时">{{ formatDuration(currentRecord.duration_ms) }}</a-descriptions-item>
                 </a-descriptions>
 
-                <!-- Prompt -->
-                <a-divider orientation="left">Prompt</a-divider>
-                <div class="content-box">
-                    {{ currentRecord.prompt || '无' }}
-                </div>
+                <a-divider orientation="left">请求体</a-divider>
+                <pre class="json-box">{{ JSON.stringify(currentRecord.request_body, null, 2) }}</pre>
 
-                <!-- 输入图片 -->
-                <template v-if="currentRecord.inputImages && currentRecord.inputImages.length > 0">
-                    <a-divider orientation="left">输入图片</a-divider>
-                    <div class="media-list">
-                        <span v-for="(img, idx) in currentRecord.inputImages" :key="idx" class="media-item">
-                            <a-tag>{{ img.split('/').pop() }}</a-tag>
-                        </span>
-                    </div>
-                </template>
-
-                <!-- 响应内容 -->
-                <a-divider orientation="left">响应内容</a-divider>
-                <div class="content-box" :class="{ 'error-box': currentRecord.status === 'failed' }">
-                    <template v-if="currentRecord.status === 'failed'">
-                        {{ currentRecord.error_message || '未知错误' }}
-                    </template>
-                    <template v-else>
-                        {{ currentRecord.response_text || '无响应' }}
-                    </template>
-                </div>
-
-                <!-- 思考过程 -->
-                <template v-if="currentRecord.reasoning_content">
-                    <a-divider orientation="left">思考过程</a-divider>
-                    <div class="content-box reasoning-box">
-                        {{ currentRecord.reasoning_content }}
-                    </div>
-                </template>
-
-                <!-- 媒体内容 -->
-                <template v-if="currentRecord.responseMedia && currentRecord.responseMedia.length > 0">
-                    <a-divider orientation="left">媒体内容 ({{ currentRecord.responseMedia.length }})</a-divider>
-                    <div class="media-gallery-large">
-                        <div v-for="(media, idx) in currentRecord.responseMedia" :key="idx" class="media-card-large">
-                            <div class="media-preview-large">
-                                <template v-if="media.status === 'downloaded' && getCachedMediaUrl(media)">
-                                    <img v-if="media.type === 'image'" :src="getCachedMediaUrl(media)" alt="生成图片" />
-                                    <video v-else-if="media.type === 'video'" :src="getCachedMediaUrl(media)" controls />
-                                </template>
-                                <template v-else>
-                                    <div class="media-placeholder-large">
-                                        <PictureOutlined v-if="media.type === 'image'" />
-                                        <PlayCircleOutlined v-else-if="media.type === 'video'" />
-                                        <FileTextOutlined v-else />
-                                        <div class="media-status">
-                                            <a-tag v-if="media.status === 'failed'" color="red">下载失败</a-tag>
-                                            <a-tag v-else-if="media.status === 'external'" color="blue">外部链接</a-tag>
-                                            <a-tag v-else-if="media.status === 'pending'" color="orange">待下载</a-tag>
-                                        </div>
-                                        <a-button v-if="media.status === 'failed'" type="primary" size="small"
-                                            @click="retryMedia(currentRecord.id, idx)">
-                                            <template #icon>
-                                                <ReloadOutlined />
-                                            </template>
-                                            重试下载
-                                        </a-button>
-                                    </div>
-                                </template>
-                            </div>
-                        </div>
-                    </div>
-                </template>
+                <a-divider orientation="left">响应</a-divider>
+                <pre v-if="currentRecord.status === 'failed'" class="json-box error-box">{{ currentRecord.error_message }}</pre>
+                <pre v-else class="json-box">{{ JSON.stringify(currentRecord.response_body, null, 2) }}</pre>
             </template>
         </a-spin>
     </a-drawer>
 
-    <!-- 快速预览弹窗 -->
-    <a-modal
-        v-model:open="previewModalVisible"
-        :footer="null"
-        :width="isMobile ? '95%' : (previewMediaType === 'image' || previewMediaType === 'video' ? '90%' : '70%')"
-        centered
-        @cancel="closePreview"
-    >
-        <template #title>
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <span>{{ previewTitle }}</span>
-                <a-button v-if="previewMediaType === 'text'" type="text" size="small" @click="copyPreviewContent">
-                    <template #icon><CopyOutlined /></template>
-                    复制全文
-                </a-button>
-            </div>
-        </template>
-        <div v-if="previewMediaType === 'text'" class="preview-text-content">
-            {{ previewContent }}
-        </div>
-        <div v-else-if="previewMediaType === 'image'" class="preview-image-content">
-            <img :src="previewMediaUrl" alt="预览图片" />
-        </div>
-        <div v-else-if="previewMediaType === 'video'" class="preview-video-content">
-            <video :src="previewMediaUrl" controls autoplay />
-        </div>
+    <a-modal v-model:open="previewModalVisible" :title="previewTitle" :footer="null" width="70%">
+        <pre class="json-box">{{ typeof previewContent === 'string' ? previewContent : JSON.stringify(previewContent, null, 2) }}</pre>
     </a-modal>
 </template>
 
 <style scoped>
-/* 图片上传区域高度控制 */
-.send-upload-area :deep(.ant-upload-drag) {
-    height: calc(100% - 20px);
-}
-
-/* 统计内容样式 */
-.stats-content {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-}
-
-.stats-numbers {
-    display: flex;
-    align-items: center;
-    gap: 20px;
-}
-
-.stat-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 12px;
-    background: #fafafa;
-    border-radius: 6px;
-    transition: all 0.2s;
-}
-
-.stat-item:hover {
-    background: #f0f0f0;
-}
-
-.stat-item.success {
-    color: #52c41a;
-}
-
-.stat-item.error {
-    color: #ff4d4f;
-}
-
-.stat-item.neutral {
-    color: #8c8c8c;
-}
-
-.stat-value {
-    font-size: 18px;
-    font-weight: 600;
-    font-family: 'SF Mono', 'Monaco', monospace;
-}
-
-.stat-label {
+.label {
     font-size: 12px;
     color: #8c8c8c;
+    margin-bottom: 4px;
 }
 
-/* 工具栏样式 */
-.toolbar {
-    margin-bottom: 16px;
-}
-
-.toolbar-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-}
-
-.toolbar-row:last-child {
-    margin-bottom: 0;
-}
-
-/* 工具栏 select 默认宽度 */
-.toolbar-status-select {
-    width: 100px;
-}
-
-.toolbar-model-select {
-    width: 200px;
-}
-
-@media (min-width: 768px) {
-    .toolbar {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 12px;
-    }
-
-    .toolbar-row {
-        margin-bottom: 0;
-    }
-
-    .toolbar-row:last-child {
-        flex: 1;
-        max-width: 300px;
-    }
-}
-
-/* 表格内样式 */
-.error-text {
-    color: #ff4d4f;
-    font-size: 12px;
-}
-
-.response-text {
-    font-size: 12px;
-    color: #595959;
-}
-
-/* 多行文本 */
-.multiline-text {
-    font-size: 12px;
-    line-height: 1.5;
-    max-height: 54px;  /* 约 3 行 */
-    overflow: hidden;
-    word-break: break-all;
-}
-
-.multiline-text.clickable {
-    cursor: pointer;
-    padding: 4px;
-    margin: -4px;
-    border-radius: 4px;
-    transition: background 0.2s;
-}
-
-.multiline-text.clickable:hover {
-    background: #f0f0f0;
-}
-
-.no-media {
-    color: #bfbfbf;
-}
-
-/* 表格行高度适配大缩略图 */
-:deep(.ant-table-tbody > tr > td) {
-    vertical-align: middle;
-}
-
-/* 列表缩略图 - 160x160 */
-.media-thumb-cell {
-    position: relative;
-    width: 160px;
-    height: 160px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin: 8px auto;
-}
-
-.thumb-img {
-    width: 160px;
-    height: 160px;
-    object-fit: cover;
-    border-radius: 4px;
-    border: 1px solid #f0f0f0;
-}
-
-.thumb-video {
-    width: 160px;
-    height: 160px;
-    background: #000;
-    border-radius: 4px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #fff;
-    font-size: 28px;
-}
-
-.thumb-placeholder {
-    width: 160px;
-    height: 160px;
-    background: #fafafa;
-    border: 1px dashed #d9d9d9;
-    border-radius: 4px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #bfbfbf;
-    font-size: 24px;
-}
-
-.media-count {
-    position: absolute;
-    bottom: 4px;
-    right: 4px;
-    background: rgba(0, 0, 0, 0.6);
-    color: #fff;
-    font-size: 11px;
-    padding: 2px 6px;
-    border-radius: 3px;
-}
-
-/* 内容框样式 */
-.content-box {
-    background: #fafafa;
-    border: 1px solid #f0f0f0;
-    border-radius: 4px;
+.meta-box {
     padding: 12px;
-    font-family: 'Consolas', 'Monaco', monospace;
-    font-size: 13px;
+    border: 1px solid #f0f0f0;
+    border-radius: 8px;
+    background: #fafafa;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.json-box {
+    background: #fafafa;
+    border: 1px solid #f0f0f0;
+    border-radius: 6px;
+    padding: 12px;
     white-space: pre-wrap;
     word-break: break-all;
-    max-height: 600px;
-    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.6;
+    max-height: 420px;
+    overflow: auto;
 }
 
-.content-box.error-box {
+.error-box {
     color: #ff4d4f;
     background: #fff2f0;
     border-color: #ffccc7;
 }
 
-.content-box.reasoning-box {
-    background: #f6ffed;
-    border-color: #b7eb8f;
-    color: #389e0d;
-}
-
-/* 详情页媒体样式 - 更大尺寸 */
-.media-gallery-large {
+.toolbar {
     display: flex;
-    flex-direction: column;
-    gap: 16px;
-}
-
-.media-card-large {
-    border: 1px solid #f0f0f0;
-    border-radius: 8px;
-    overflow: hidden;
-    background: #fafafa;
-}
-
-.media-preview-large {
-    width: 100%;
-    min-height: 300px;
-    max-height: 500px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #f5f5f5;
-}
-
-.media-preview-large img {
-    max-width: 100%;
-    max-height: 500px;
-    object-fit: contain;
-}
-
-.media-preview-large video {
-    max-width: 100%;
-    max-height: 500px;
-}
-
-.media-placeholder-large {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    color: #bfbfbf;
-    gap: 12px;
-    padding: 40px;
-    font-size: 48px;
-}
-
-.media-status {
-    font-size: 14px;
-}
-
-/* 媒体列表 */
-.media-list {
-    display: flex;
-    flex-wrap: wrap;
     gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
 }
 
-/* 预览弹窗内容 */
-.preview-text-content {
-    background: #fafafa;
-    border: 1px solid #f0f0f0;
-    border-radius: 4px;
-    padding: 16px;
-    font-family: 'Consolas', 'Monaco', monospace;
-    font-size: 14px;
-    white-space: pre-wrap;
+.multiline-text {
+    font-size: 12px;
+    line-height: 1.5;
+    max-height: 54px;
+    overflow: hidden;
     word-break: break-all;
-    max-height: 60vh;
-    overflow-y: auto;
-    line-height: 1.6;
 }
 
-.preview-image-content {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 200px;
+.clickable {
+    cursor: pointer;
 }
 
-.preview-image-content img {
-    max-width: 100%;
-    max-height: 70vh;
-    object-fit: contain;
-    border-radius: 4px;
-}
-
-.preview-video-content {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-}
-
-.preview-video-content video {
-    max-width: 100%;
-    max-height: 70vh;
-    border-radius: 4px;
-}
-
-/* 图片上传区域尺寸 */
-.send-upload-area {
-    flex: 0 0 280px;
-    min-width: 200px;
-}
-
-/* 日期选择器 */
-.stats-date-picker {
-    width: 240px;
-}
-
-/* 响应式 - 平板及以下 */
-@media (max-width: 768px) {
-    .send-upload-area {
-        flex: 1 1 100% !important;
-        min-width: 0 !important;
-    }
-
-    .stats-date-picker {
-        width: 100%;
-    }
-
-    .media-thumb-cell {
-        width: 80px;
-        height: 80px;
-    }
-
-    .thumb-img {
-        width: 80px;
-        height: 80px;
-    }
-
-    .thumb-video {
-        width: 80px;
-        height: 80px;
-        font-size: 20px;
-    }
-
-    .thumb-placeholder {
-        width: 80px;
-        height: 80px;
-        font-size: 18px;
-    }
-
-    .toolbar {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        flex-wrap: wrap;
-    }
-
-    .toolbar-row {
-        flex-wrap: nowrap;
-        margin-bottom: 0;
-        gap: 4px;
-    }
-
-    .toolbar-row:last-child {
-        flex: 1;
-        min-width: 100px;
-    }
-
-    .toolbar-status-select {
-        width: 80px !important;
-    }
-
-    .toolbar-model-select {
-        width: 100px !important;
-    }
-
-    .stat-value {
-        font-size: 14px;
-    }
-
-    .stat-item {
-        padding: 2px 8px;
-    }
-
-    .content-box {
-        max-height: 400px;
-        font-size: 12px;
-        padding: 8px;
-    }
-
-    .media-preview-large {
-        min-height: 200px;
-        max-height: 350px;
-    }
-}
-
-/* 响应式 - 手机 */
-@media (max-width: 576px) {
-    .stats-content {
-        flex-direction: column;
-        align-items: flex-start;
-    }
-
-    .stats-content .ant-divider {
-        display: none;
-    }
-
-    .stats-numbers {
-        margin-top: 8px;
-        flex-wrap: wrap;
-        gap: 8px;
-    }
-
-    .stat-item {
-        padding: 2px 6px;
-        gap: 4px;
-    }
-
-    .stat-value {
-        font-size: 13px;
-    }
-
-    .stat-label {
-        font-size: 11px;
-    }
+.error-text {
+    color: #ff4d4f;
 }
 </style>

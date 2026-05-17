@@ -40,15 +40,10 @@ import {
     getList as getHistoryList,
     getDetail as getHistoryDetail,
     deleteRecords as deleteHistoryRecords,
-    deleteByDateRange as deleteHistoryByDateRange,
-    retryMediaDownload,
-    getStats as getHistoryStats,
-    getModelList as getHistoryModelList,
-    getMediaDir
+    deleteByDateRange as deleteHistoryByDateRange
 } from '../../../utils/history.js';
 import path from 'path';
 import fs from 'fs/promises';
-import { useContextDownload } from '../../../backend/utils/download.js';
 import {
     listAdapterFiles,
     readAdapterSource,
@@ -58,7 +53,6 @@ import {
     normalizeAdapterId,
     adapterSourceExists
 } from '../../../backend/adapterStore.js';
-import { getProvider } from '../../../backend/providers/registry.js';
 
 function buildRequestId() {
     return `adapter-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -100,14 +94,16 @@ async function cleanupDebugArtifacts(tempDir, ttlMs = 30 * 60 * 1000) {
     } catch { }
 }
 
-function buildProviderMeta(providerEntry, adapterId = null) {
-    const provider = getProvider(providerEntry.type);
-    const models = Array.isArray(providerEntry.models) ? providerEntry.models : [];
+function buildAdapterMeta(manifest, valid = true, error = null) {
     return {
-        type: providerEntry.type,
-        models: adapterId ? models.filter(modelId => registry.isModelEnabled(adapterId, modelId)) : models,
-        modelCount: adapterId ? models.filter(modelId => registry.isModelEnabled(adapterId, modelId)).length : models.length,
-        inputSchema: provider?.buildInputSchema({ ...providerEntry, models: adapterId ? models.filter(modelId => registry.isModelEnabled(adapterId, modelId)) : models }) || { fields: [] }
+        id: manifest.id,
+        fileId: manifest.id,
+        valid,
+        error,
+        name: manifest.name || manifest.id,
+        endpoint: `/api/${manifest.id}`,
+        inputJsonSchema: manifest.inputJsonSchema || null,
+        outputJsonSchema: manifest.outputJsonSchema || null
     };
 }
 
@@ -121,46 +117,28 @@ async function inspectAdapterFile(file) {
                 valid: false,
                 error: '未导出 manifest',
                 name: file.id,
-                providers: []
+                endpoint: `/api/${file.id}`,
+                inputJsonSchema: null,
+                outputJsonSchema: null
             };
         }
 
         const manifest = module.manifest;
         if (manifest.id !== file.id) {
-            return {
+            return buildAdapterMeta({
                 id: file.id,
-                fileId: file.id,
-                valid: false,
-                error: `manifest.id 必须与文件名一致 (${file.id})`,
                 name: manifest.name || file.id,
-                providers: Array.isArray(manifest.providers)
-                    ? manifest.providers.filter(providerEntry => providerEntry && typeof providerEntry === 'object').map(providerEntry => buildProviderMeta(providerEntry, manifest.id))
-                    : []
-            };
+                inputJsonSchema: manifest.inputJsonSchema || null,
+                outputJsonSchema: manifest.outputJsonSchema || null
+            }, false, `manifest.id 必须与文件名一致 (${file.id})`);
         }
 
         const errors = registry.getManifestErrors(manifest, file.fileName);
         if (errors.length > 0) {
-            return {
-                id: file.id,
-                fileId: file.id,
-                valid: false,
-                error: errors.join('; '),
-                name: manifest.name || file.id,
-                providers: Array.isArray(manifest.providers)
-                    ? manifest.providers.filter(providerEntry => providerEntry && typeof providerEntry === 'object').map(providerEntry => buildProviderMeta(providerEntry, manifest.id))
-                    : []
-            };
+            return buildAdapterMeta(manifest, false, errors.join('; '));
         }
 
-        return {
-            id: manifest.id,
-            fileId: file.id,
-            valid: true,
-            error: null,
-            name: manifest.name || manifest.id,
-            providers: manifest.providers.map(providerEntry => buildProviderMeta(providerEntry, manifest.id))
-        };
+        return buildAdapterMeta(manifest, true, null);
     } catch (err) {
         return {
             id: file.id,
@@ -168,7 +146,9 @@ async function inspectAdapterFile(file) {
             valid: false,
             error: err.message,
             name: file.id,
-            providers: []
+            endpoint: `/api/${file.id}`,
+            inputJsonSchema: null,
+            outputJsonSchema: null
         };
     }
 }
@@ -378,8 +358,7 @@ export function createAdminRouter(context) {
                     const queueConfig = getQueueConfig();
                     sendJson(res, 200, {
                         ...serverConfig,
-                        queueBuffer: queueConfig.queueBuffer,
-                        imageLimit: queueConfig.imageLimit
+                        queueBuffer: queueConfig.queueBuffer
                     });
                 } else if (method === 'POST') {
                     const body = await readBody(req);
@@ -396,7 +375,7 @@ export function createAdminRouter(context) {
 
                     // 分别保存 server 和 queue 配置
                     saveServerConfig(body);
-                    if (body.queueBuffer !== undefined || body.imageLimit !== undefined) {
+                    if (body.queueBuffer !== undefined) {
                         saveQueueConfig(body);
                     }
                     sendJson(res, 200, { success: true, message: '配置已保存，请重启服务生效' });
@@ -699,7 +678,7 @@ export function createAdminRouter(context) {
                 const pageSize = parseInt(url.searchParams.get('pageSize') || '20', 10);
                 const filters = {
                     status: url.searchParams.get('status') || null,
-                    modelId: url.searchParams.get('model') || null,
+                    adapterId: url.searchParams.get('adapter') || null,
                     search: url.searchParams.get('search') || null,
                     startDate: url.searchParams.get('startDate') || null,
                     endDate: url.searchParams.get('endDate') || null
@@ -710,97 +689,15 @@ export function createAdminRouter(context) {
                 return;
             }
 
-            // GET /admin/history/stats - 历史统计摘要
-            if (method === 'GET' && pathname === '/history/stats') {
-                const url = new URL(req.url, `http://${req.headers.host}`);
-                const filters = {
-                    startDate: url.searchParams.get('startDate') || null,
-                    endDate: url.searchParams.get('endDate') || null
-                };
-
-                const stats = getHistoryStats(filters);
-                sendJson(res, 200, stats);
-                return;
-            }
-
-            // GET /admin/history/models - 获取历史中使用过的模型列表
-            if (method === 'GET' && pathname === '/history/models') {
-                const models = getHistoryModelList();
-                sendJson(res, 200, models);
-                return;
-            }
-
-            // GET /admin/history/media/:filepath - 静态媒体文件服务
-            if (method === 'GET' && pathname.startsWith('/history/media/')) {
-                const filepath = pathname.replace('/history/media/', '');
-                if (!filepath || filepath.includes('..')) {
-                    sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: '无效的文件名' });
-                    return;
-                }
-
-                try {
-                    const fullPath = path.join(getMediaDir(), filepath);
-                    const data = await fs.readFile(fullPath);
-                    const ext = path.extname(filepath).toLowerCase();
-                    const mimeTypes = {
-                        '.png': 'image/png',
-                        '.jpg': 'image/jpeg',
-                        '.jpeg': 'image/jpeg',
-                        '.gif': 'image/gif',
-                        '.webp': 'image/webp',
-                        '.mp4': 'video/mp4',
-                        '.webm': 'video/webm'
-                    };
-                    res.writeHead(200, {
-                        'Content-Type': mimeTypes[ext] || 'application/octet-stream',
-                        'Content-Length': data.length,
-                        'Cache-Control': 'public, max-age=31536000'
-                    });
-                    res.end(data);
-                } catch (e) {
-                    sendApiError(res, { code: ERROR_CODES.NOT_FOUND, message: '文件不存在', status: 404 });
-                }
-                return;
-            }
-
             // GET /admin/history/:id - 单条记录详情
             const historyDetailMatch = pathname.match(/^\/history\/([^/]+)$/);
-            if (method === 'GET' && historyDetailMatch && !pathname.includes('/retry-media')) {
+            if (method === 'GET' && historyDetailMatch) {
                 const id = historyDetailMatch[1];
                 const record = getHistoryDetail(id);
                 if (record) {
                     sendJson(res, 200, record);
                 } else {
                     sendApiError(res, { code: ERROR_CODES.NOT_FOUND, message: '记录不存在', status: 404 });
-                }
-                return;
-            }
-
-            // POST /admin/history/:id/retry-media - 重试下载媒体
-            const retryMediaMatch = pathname.match(/^\/history\/([^/]+)\/retry-media$/);
-            if (method === 'POST' && retryMediaMatch) {
-                const id = retryMediaMatch[1];
-                const body = await readBody(req);
-                const mediaIndex = body.mediaIndex ?? 0;
-
-                // 使用 Pool 的浏览器下载（如果可用）
-                let downloadFn = null;
-                try {
-                    const poolContext = queueManager?.getPoolContext?.();
-                    const page = poolContext?.getFirstPage?.();
-                    if (page) {
-                        const imgDlCfg = config?.backend?.pool?.failover || {};
-                        downloadFn = (url) => useContextDownload(url, page, {
-                            retries: imgDlCfg.imgDlRetry ? (imgDlCfg.imgDlRetryMaxRetries || 3) : 1
-                        });
-                    }
-                } catch { /* Pool 未初始化，使用后备方案 */ }
-
-                const result = await retryMediaDownload(id, mediaIndex, downloadFn);
-                if (result.success) {
-                    sendJson(res, 200, result);
-                } else {
-                    sendApiError(res, { code: ERROR_CODES.INTERNAL_ERROR, message: result.message });
                 }
                 return;
             }

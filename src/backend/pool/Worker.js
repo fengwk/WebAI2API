@@ -1,6 +1,6 @@
 /**
  * @fileoverview Worker 类
- * @description 封装单个浏览器实例，提供模型匹配和任务执行能力
+ * @description 封装单个浏览器实例，提供适配器匹配和任务执行能力
  */
 
 import fs from 'fs';
@@ -9,6 +9,7 @@ import { logger } from '../../utils/logger.js';
 import { initBrowserBase, createCursor } from '../engine/launcher.js';
 import { registry } from '../registry.js';
 import { saveRuntimeFile } from '../runtimeFiles.js';
+import { saveInputValueToTempFile } from '../../utils/inputFiles.js';
 
 function createAdapterApi(workerName, instanceName, meta = {}, fileOutput = null, page = null) {
     return {
@@ -224,23 +225,152 @@ function normalizeExecutionError(error) {
     return { message: String(error), retryable: true };
 }
 
-function normalizeExecutionResult(result) {
-    if (!result || typeof result !== 'object' || typeof result.success !== 'boolean') {
-        throw new Error('适配器必须返回 { success, data, error }');
+function detectMimeTypeFromPath(filePath, fallback = 'application/octet-stream') {
+    const ext = path.extname(String(filePath || '')).toLowerCase();
+    switch (ext) {
+        case '.png': return 'image/png';
+        case '.jpg':
+        case '.jpeg': return 'image/jpeg';
+        case '.webp': return 'image/webp';
+        case '.gif': return 'image/gif';
+        case '.pdf': return 'application/pdf';
+        case '.txt': return 'text/plain';
+        case '.json': return 'application/json';
+        default: return fallback;
     }
+}
 
-    if (result.success) {
-        return {
-            success: true,
-            data: result.data ?? null,
-            error: null
-        };
+async function fileValueFromPath(filePath, options = {}, fileOutput = null) {
+    const mode = options.mode || 'object';
+    const fileName = options.fileName || path.basename(filePath);
+    const mimeType = options.mimeType || detectMimeTypeFromPath(filePath);
+    const buffer = await fs.promises.readFile(filePath);
+
+    if (mode === 'base64') {
+        return buffer.toString('base64');
     }
+    if (mode === 'dataUrl') {
+        return `data:${mimeType};base64,${buffer.toString('base64')}`;
+    }
+    if (mode === 'url') {
+        if (!fileOutput?.rootDir || !fileOutput?.urlBasePath) {
+            throw new Error('当前上下文未启用文件 URL 输出');
+        }
+        const relativePath = options.relativePath || path.posix.join('outputs', `${Date.now()}-${fileName}`);
+        const saved = await saveRuntimeFile({
+            rootDir: fileOutput.rootDir,
+            urlBasePath: fileOutput.urlBasePath,
+            relativePath,
+            content: buffer,
+            mimeType
+        });
+        return saved.url;
+    }
+    return {
+        fileName,
+        mimeType,
+        base64: buffer.toString('base64')
+    };
+}
+
+async function fileValueFromBuffer(buffer, options = {}, fileOutput = null) {
+    const mode = options.mode || 'object';
+    const fileName = options.fileName || 'file.bin';
+    const mimeType = options.mimeType || detectMimeTypeFromPath(fileName);
+
+    if (mode === 'base64') {
+        return buffer.toString('base64');
+    }
+    if (mode === 'dataUrl') {
+        return `data:${mimeType};base64,${buffer.toString('base64')}`;
+    }
+    if (mode === 'url') {
+        if (!fileOutput?.rootDir || !fileOutput?.urlBasePath) {
+            throw new Error('当前上下文未启用文件 URL 输出');
+        }
+        const relativePath = options.relativePath || path.posix.join('outputs', `${Date.now()}-${fileName}`);
+        const saved = await saveRuntimeFile({
+            rootDir: fileOutput.rootDir,
+            urlBasePath: fileOutput.urlBasePath,
+            relativePath,
+            content: buffer,
+            mimeType
+        });
+        return saved.url;
+    }
+    return {
+        fileName,
+        mimeType,
+        base64: buffer.toString('base64')
+    };
+}
+
+function createApiError(options = {}) {
+    const error = new Error(options.message || '执行失败');
+    error.status = options.status || 500;
+    error.retryable = options.retryable !== false;
+    error.details = options.details || null;
+    return error;
+}
+
+function createExecutionHelpers(context = {}) {
+    const { tempDir, fileOutput } = context;
 
     return {
-        success: false,
-        data: null,
-        error: normalizeExecutionError(result.error)
+        apiError: createApiError,
+        files: {
+            async resolve(value, options = {}) {
+                const saved = await saveInputValueToTempFile(value, {
+                    tempDir,
+                    prefix: options.prefix || 'input',
+                    fileName: options.fileName,
+                    mimeType: options.mimeType
+                });
+                return {
+                    path: saved.path,
+                    fileName: saved.fileName,
+                    mimeType: saved.mimeType,
+                    sourceUrl: saved.sourceUrl || null
+                };
+            },
+            async resolveMany(values, options = {}) {
+                const items = Array.isArray(values) ? values : (values ? [values] : []);
+                const resolved = [];
+                for (const item of items) {
+                    resolved.push(await this.resolve(item, options));
+                }
+                return resolved;
+            },
+            async fromPath(filePath, options = {}) {
+                return await fileValueFromPath(filePath, options, fileOutput);
+            },
+            async fromBuffer(buffer, options = {}) {
+                return await fileValueFromBuffer(Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer), options, fileOutput);
+            },
+            async fromDataUrl(dataUrl, options = {}) {
+                const match = /^data:([^;]+);base64,(.+)$/s.exec(String(dataUrl || ''));
+                if (!match) {
+                    throw new Error('无效的 data URL');
+                }
+                return await fileValueFromBuffer(Buffer.from(match[2], 'base64'), {
+                    ...options,
+                    mimeType: options.mimeType || match[1].trim().toLowerCase()
+                }, fileOutput);
+            },
+            async fromUrl(url, options = {}) {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`文件下载失败: HTTP ${response.status}`);
+                }
+                const buffer = Buffer.from(await response.arrayBuffer());
+                const mimeType = options.mimeType || response.headers.get('content-type')?.split(';')[0].trim() || 'application/octet-stream';
+                return await fileValueFromBuffer(buffer, {
+                    ...options,
+                    mimeType,
+                    fileName: options.fileName || path.basename(new URL(url).pathname) || 'remote.bin'
+                }, fileOutput);
+            }
+        }
     };
 }
 
@@ -260,9 +390,6 @@ export class Worker {
         this.proxyConfig = workerConfig.resolvedProxy;
         this.globalConfig = globalConfig;
         this.workerConfig = workerConfig;
-
-        // Merge 模式专属
-        this.mergeTypes = workerConfig.mergeTypes || [];
 
         // 运行时状态
         this.browser = null;
@@ -450,73 +577,24 @@ export class Worker {
     }
 
     /**
-     * 检查是否支持指定 provider + model
+     * 检查是否支持指定适配器
      */
-    supports(providerType, modelId) {
-        if (this.type === 'merge') {
-            return this.mergeTypes.some(type => registry.supportsTask(type, providerType, modelId));
-        }
-        return registry.supportsTask(this.type, providerType, modelId);
-    }
-
-    /**
-     * 获取支持当前任务的候选适配器类型
-     * @private
-     */
-    _getCandidateTypes(providerType, modelId) {
-        const types = this.type === 'merge' ? this.mergeTypes : [this.type];
-        return types.filter(type => registry.supportsTask(type, providerType, modelId));
+    supports(adapterId) {
+        return this.type === adapterId;
     }
 
     async executeTask(ctx, task, meta = {}) {
-        const failoverConfig = this.globalConfig.backend?.pool?.failover || {};
-        const candidateTypes = this._getCandidateTypes(task.providerType, task.modelId);
-        if (candidateTypes.length === 0) {
+        if (!this.supports(task.adapterId)) {
             return {
                 success: false,
                 data: null,
                 error: {
-                    message: `Worker [${this.name}] 不支持 provider=${task.providerType}, model=${task.modelId || 'default'}`,
+                    message: `Worker [${this.name}] 不支持适配器: ${task.adapterId}`,
                     retryable: false
                 }
             };
         }
-
-        if (this.type !== 'merge' || failoverConfig.enabled === false || candidateTypes.length === 1) {
-            return await this._executeAdapter(ctx, candidateTypes[0], task, meta);
-        }
-
-        const maxRetries = failoverConfig.maxRetries ?? 2;
-        const maxAttempts = maxRetries === 0
-            ? candidateTypes.length
-            : Math.min(maxRetries + 1, candidateTypes.length);
-
-        let lastError = null;
-        for (let i = 0; i < maxAttempts; i++) {
-            const type = candidateTypes[i];
-            const result = await this._executeAdapter(ctx, type, task, meta);
-            if (result.success) {
-                return result;
-            }
-
-            lastError = result.error;
-            if (result.error?.retryable === false) {
-                return result;
-            }
-
-            if (i < maxAttempts - 1) {
-                logger.warn('工作池', `[${this.name}] ${type} 失败，尝试下一个适配器...`, {
-                    error: result.error?.message,
-                    ...meta
-                });
-            }
-        }
-
-        return {
-            success: false,
-            data: null,
-            error: lastError || { message: '所有候选适配器都执行失败', retryable: true }
-        };
+        return await this._executeAdapter(ctx, this.type, task, meta);
     }
 
     /**
@@ -541,19 +619,19 @@ export class Worker {
             }
         }
 
-        const providerEntry = registry.resolveProviderEntry(type, task.providerType, task.modelId);
-        if (!providerEntry) {
+        const adapter = registry.getAdapter(type);
+        if (!adapter) {
             return {
                 success: false,
                 data: null,
                 error: {
-                    message: `适配器 ${type} 不支持 provider=${task.providerType}, model=${task.modelId || 'default'}`,
+                    message: `适配器不存在: ${type}`,
                     retryable: false
                 }
             };
         }
 
-        logger.info('工作池', `[${this.name}] 执行任务 -> ${type} (${task.providerType}/${task.modelId || 'default'})`, meta);
+        logger.info('工作池', `[${this.name}] 执行任务 -> ${type}`, meta);
 
         const subContext = {
             ...ctx,
@@ -569,13 +647,21 @@ export class Worker {
                 type: this.type,
                 instance: this.instanceName
             },
-            api: createAdapterApi(this.name, this.instanceName, meta, task.fileOutput, this.page)
+            api: createAdapterApi(this.name, this.instanceName, meta, task.fileOutput, this.page),
+            helpers: createExecutionHelpers({
+                tempDir: this.globalConfig?.paths?.tempDir,
+                fileOutput: task.fileOutput
+            })
         };
 
         this.busyCount++;
         try {
-            const result = await providerEntry.execute(subContext, task.input);
-            return normalizeExecutionResult(result);
+            const result = await adapter.execute(subContext, task.input);
+            return {
+                success: true,
+                data: result ?? null,
+                error: null
+            };
         } catch (err) {
             logger.error('工作池', `[${this.name}] 适配器执行异常`, { error: err.message, ...meta });
             return {
@@ -600,24 +686,6 @@ export class Worker {
         await this._initNewBrowser();
         this.initialized = true;
         logger.info('工作池', `[${this.name}] 浏览器已成功重新初始化`);
-    }
-
-    /**
-     * 获取支持的模型列表
-     */
-    getModels() {
-        const types = this.type === 'merge' ? this.mergeTypes : [this.type];
-        const seenIds = new Set();
-        const models = [];
-        for (const type of types) {
-            const result = registry.getModelsForAdapter(type);
-            for (const model of result.data || []) {
-                if (seenIds.has(model.id)) continue;
-                seenIds.add(model.id);
-                models.push(model);
-            }
-        }
-        return models;
     }
 
     async runDebugScript(script, input, meta = {}, options = {}) {
@@ -657,7 +725,14 @@ export class Worker {
                 type: this.type,
                 instance: this.instanceName
             },
-            api
+            api,
+            helpers: createExecutionHelpers({
+                tempDir: this.globalConfig?.paths?.tempDir,
+                fileOutput: {
+                    rootDir: artifactDir,
+                    urlBasePath: artifactBasePath
+                }
+            })
         };
 
         this.busyCount++;

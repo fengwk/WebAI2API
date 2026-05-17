@@ -46,9 +46,7 @@ export function getServerConfig() {
     return {
         port: config.server?.port || 3000,
         authToken: config.server?.auth || '',
-        keepaliveMode: config.server?.keepalive?.mode || 'comment',
         logLevel: config.logLevel || 'info',
-        imageMarkdown: config.server?.imageMarkdown || false,
         publicFileBaseUrl: config.server?.publicFileBaseUrl || ''
     };
 }
@@ -64,12 +62,7 @@ export function saveServerConfig(data) {
 
     if (data.port !== undefined) config.server.port = data.port;
     if (data.authToken !== undefined) config.server.auth = data.authToken;
-    if (data.keepaliveMode !== undefined) {
-        if (!config.server.keepalive) config.server.keepalive = {};
-        config.server.keepalive.mode = data.keepaliveMode;
-    }
     if (data.logLevel !== undefined) config.logLevel = data.logLevel;
-    if (data.imageMarkdown !== undefined) config.server.imageMarkdown = data.imageMarkdown;
     if (data.publicFileBaseUrl !== undefined) config.server.publicFileBaseUrl = data.publicFileBaseUrl;
 
     writeConfig(config);
@@ -152,8 +145,7 @@ export function saveBrowserConfig(data) {
 export function getQueueConfig() {
     const config = readRawConfig();
     return {
-        queueBuffer: config.queue?.queueBuffer ?? 2,
-        imageLimit: config.queue?.imageLimit ?? 5
+        queueBuffer: config.queue?.queueBuffer ?? 2
     };
 }
 
@@ -167,7 +159,6 @@ export function saveQueueConfig(data) {
     if (!config.queue) config.queue = {};
 
     if (data.queueBuffer !== undefined) config.queue.queueBuffer = data.queueBuffer;
-    if (data.imageLimit !== undefined) config.queue.imageLimit = data.imageLimit;
 
     writeConfig(config);
 }
@@ -194,8 +185,7 @@ export function getInstancesConfig() {
         } : null,
         workers: (inst.workers || []).map(w => ({
             name: w.name,
-            type: w.type,
-            mergeTypes: w.mergeTypes || []
+            type: w.type
         }))
     }));
 }
@@ -232,14 +222,10 @@ export function saveInstancesConfig(data) {
         }
 
         result.workers = (inst.workers || []).map(w => {
-            const worker = {
+            return {
                 name: w.name,
                 type: w.type
             };
-            if (w.type === 'merge' && w.mergeTypes) {
-                worker.mergeTypes = w.mergeTypes;
-            }
-            return worker;
         });
 
         return result;
@@ -289,9 +275,7 @@ export function getPoolConfig() {
         waitTimeout: pool.waitTimeout != null ? Math.round(pool.waitTimeout / 1000) : 120,
         failover: {
             enabled: failover.enabled !== false, // 默认 true
-            maxRetries: failover.maxRetries ?? 2,
-            imgDlRetry: failover.imgDlRetry || false,
-            imgDlRetryMaxRetries: failover.imgDlRetryMaxRetries ?? 2
+            maxRetries: failover.maxRetries ?? 2
         }
     };
 }
@@ -323,12 +307,6 @@ export function savePoolConfig(data) {
         }
         if (data.failover.maxRetries !== undefined) {
             config.backend.pool.failover.maxRetries = data.failover.maxRetries;
-        }
-        if (data.failover.imgDlRetry !== undefined) {
-            config.backend.pool.failover.imgDlRetry = data.failover.imgDlRetry;
-        }
-        if (data.failover.imgDlRetryMaxRetries !== undefined) {
-            config.backend.pool.failover.imgDlRetryMaxRetries = data.failover.imgDlRetryMaxRetries;
         }
     }
 

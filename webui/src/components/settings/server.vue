@@ -7,13 +7,10 @@ const settingsStore = useSettingsStore();
 
 // 表单数据
 const formData = reactive({
-    port: 5173,
+    port: 3000,
     authToken: '',
-    keepaliveMode: 'comment',
     logLevel: 'info',
     queueBuffer: 2,
-    imageLimit: 5,
-    imageMarkdown: false,
     publicFileBaseUrl: ''
 });
 
@@ -63,7 +60,7 @@ const handleSave = async () => {
                     <div style="margin-bottom: 8px;">
                         <div style="font-weight: 600; margin-bottom: 4px;">监听端口</div>
                         <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
-                            设置服务器监听的端口号，默认为 5173
+                            设置服务器监听的端口号，默认为 3000
                         </div>
                         <a-input-number v-model:value="formData.port" :min="1" :max="65535" placeholder="请输入端口号"
                             style="width: 100%" />
@@ -78,20 +75,6 @@ const handleSave = async () => {
                             用于 API 请求鉴权的密钥，留空则不启用鉴权
                         </div>
                         <a-input-password v-model:value="formData.authToken" placeholder="请输入 Token" type="password" />
-                    </div>
-                </a-col>
-
-                <!-- 心跳包类型 (Keepalive Mode) -->
-                <a-col :xs="24" :md="12">
-                    <div style="margin-bottom: 8px;">
-                        <div style="font-weight: 600; margin-bottom: 4px;">心跳包类型</div>
-                        <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
-                            选择 SSE 流式响应的心跳包格式
-                        </div>
-                        <a-select v-model:value="formData.keepaliveMode" style="width: 100%" placeholder="请选择心跳包类型">
-                            <a-select-option value="comment">Comment - 注释格式</a-select-option>
-                            <a-select-option value="content">Content - 内容格式</a-select-option>
-                        </a-select>
                     </div>
                 </a-col>
 
@@ -114,9 +97,9 @@ const handleSave = async () => {
                 <!-- 外部文件访问基准 URL -->
                 <a-col :xs="24" :md="12">
                     <div style="margin-bottom: 8px;">
-                        <div style="font-weight: 600; margin-bottom: 4px;">图片 URL 基准地址</div>
+                        <div style="font-weight: 600; margin-bottom: 4px;">文件 URL 基准地址</div>
                         <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
-                            当图片接口返回 url 时，用它拼接外部可访问地址。<br>
+                            当脚本通过 helper 返回 URL 文件时，用它拼接外部可访问地址。<br>
                             例如: https://gpt-load.kk1.fun/proxy/gpt-image
                         </div>
                         <a-input v-model:value="formData.publicFileBaseUrl" placeholder="留空则返回 /files/... 相对路径" />
@@ -148,30 +131,6 @@ const handleSave = async () => {
                     </div>
                 </a-col>
 
-                <!-- 图片数量上限 -->
-                <a-col :xs="24" :md="12">
-                    <div style="margin-bottom: 8px;">
-                        <div style="font-weight: 600; margin-bottom: 4px;">图片数量上限</div>
-                        <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
-                            单次请求最多支持的图片附件数量<br>
-                            网页最多支持10个附件，超出会被丢弃
-                        </div>
-                        <a-input-number v-model:value="formData.imageLimit" :min="1" :max="10" placeholder="默认为 5"
-                            style="width: 100%" />
-                    </div>
-                </a-col>
-
-                <!-- 图片生成结果使用 Markdown -->
-                <a-col :xs="24" :md="12">
-                    <div style="margin-bottom: 8px;">
-                        <div style="font-weight: 600; margin-bottom: 4px;">图片 Markdown 格式</div>
-                        <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
-                            开启后生图结果将使用 Markdown 语法返回图片内容<br>
-                            开启此项需要客户端支持渲染 Markdown
-                        </div>
-                        <a-switch v-model:checked="formData.imageMarkdown" />
-                    </div>
-                </a-col>
             </a-row>
 
             <!-- 保存按钮（右下角） -->
