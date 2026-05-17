@@ -10,50 +10,71 @@ import { logger } from './logger.js';
 
 const DATA_DIR = path.join(process.cwd(), 'data', 'history');
 const DB_PATH = path.join(DATA_DIR, 'history.db');
+const BODY_PREVIEW_LIMIT = 1024;
 
 let db = null;
+
+const REQUIRED_COLUMNS = [
+    ['id', 'TEXT PRIMARY KEY'],
+    ['created_at', 'INTEGER NOT NULL'],
+    ['adapter_id', 'TEXT'],
+    ['endpoint_path', 'TEXT'],
+    ['request_summary', 'TEXT'],
+    ['request_body', 'TEXT'],
+    ['response_summary', 'TEXT'],
+    ['response_body', 'TEXT'],
+    ['status', "TEXT DEFAULT 'pending'"],
+    ['error_message', 'TEXT'],
+    ['duration_ms', 'INTEGER']
+];
+
+function getExistingColumns(database) {
+    return new Set(
+        database
+            .prepare('PRAGMA table_info(requests)')
+            .all()
+            .map(row => row.name)
+    );
+}
+
+function ensureRequestTable(database) {
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS requests (
+            id TEXT PRIMARY KEY,
+            created_at INTEGER NOT NULL
+        );
+    `);
+
+    const existingColumns = getExistingColumns(database);
+    for (const [columnName, definition] of REQUIRED_COLUMNS) {
+        if (existingColumns.has(columnName)) continue;
+        database.exec(`ALTER TABLE requests ADD COLUMN ${columnName} ${definition}`);
+    }
+
+    database.exec(`
+        CREATE INDEX IF NOT EXISTS idx_created_at ON requests(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_status ON requests(status);
+        CREATE INDEX IF NOT EXISTS idx_adapter_id ON requests(adapter_id);
+    `);
+}
 
 export async function initHistoryDb() {
     if (db) return db;
 
     await fs.mkdir(DATA_DIR, { recursive: true });
-    db = new Database(DB_PATH);
+    const database = new Database(DB_PATH);
 
-    db.exec(`
-        CREATE TABLE IF NOT EXISTS requests (
-            id TEXT PRIMARY KEY,
-            created_at INTEGER NOT NULL,
-            adapter_id TEXT,
-            endpoint_path TEXT,
-            request_summary TEXT,
-            request_body TEXT,
-            response_summary TEXT,
-            response_body TEXT,
-            status TEXT DEFAULT 'pending',
-            error_message TEXT,
-            duration_ms INTEGER
-        );
-        CREATE INDEX IF NOT EXISTS idx_created_at ON requests(created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_status ON requests(status);
-        CREATE INDEX IF NOT EXISTS idx_adapter_id ON requests(adapter_id);
-    `);
-
-    const migrations = [
-        'ALTER TABLE requests ADD COLUMN adapter_id TEXT',
-        'ALTER TABLE requests ADD COLUMN endpoint_path TEXT',
-        'ALTER TABLE requests ADD COLUMN request_summary TEXT',
-        'ALTER TABLE requests ADD COLUMN request_body TEXT',
-        'ALTER TABLE requests ADD COLUMN response_summary TEXT',
-        'ALTER TABLE requests ADD COLUMN response_body TEXT'
-    ];
-    for (const sql of migrations) {
+    try {
+        ensureRequestTable(database);
+        db = database;
+        logger.info('历史记录', '数据库初始化完成');
+        return db;
+    } catch (error) {
         try {
-            db.exec(sql);
+            database.close();
         } catch { }
+        throw error;
     }
-
-    logger.info('历史记录', '数据库初始化完成');
-    return db;
 }
 
 function getDb() {
@@ -70,6 +91,15 @@ function safeParseJson(text, fallback = null) {
     } catch {
         return fallback;
     }
+}
+
+function buildBodyPreview(text, maxLen = BODY_PREVIEW_LIMIT) {
+    const raw = typeof text === 'string' ? text : '';
+    return {
+        preview: raw.length > maxLen ? `${raw.slice(0, maxLen)}...` : raw,
+        truncated: raw.length > maxLen,
+        size: raw.length
+    };
 }
 
 export function createRecord(data) {
@@ -161,19 +191,27 @@ export function getList(filters = {}, page = 1, pageSize = 20) {
         ORDER BY created_at DESC
         LIMIT ? OFFSET ?
     `);
-    const items = dataStmt.all(...params, pageSize, offset).map(row => ({
-        id: row.id,
-        created_at: row.created_at,
-        adapter_id: row.adapter_id,
-        endpoint_path: row.endpoint_path,
-        request_summary: row.request_summary,
-        request_body: safeParseJson(row.request_body, null),
-        response_summary: row.response_summary,
-        response_body: safeParseJson(row.response_body, null),
-        status: row.status,
-        error_message: row.error_message,
-        duration_ms: row.duration_ms
-    }));
+    const items = dataStmt.all(...params, pageSize, offset).map(row => {
+        const requestBody = buildBodyPreview(row.request_body);
+        const responseBody = buildBodyPreview(row.response_body);
+        return {
+            id: row.id,
+            created_at: row.created_at,
+            adapter_id: row.adapter_id,
+            endpoint_path: row.endpoint_path,
+            request_summary: row.request_summary,
+            request_body_preview: requestBody.preview,
+            request_body_truncated: requestBody.truncated,
+            request_body_size: requestBody.size,
+            response_summary: row.response_summary,
+            response_body_preview: responseBody.preview,
+            response_body_truncated: responseBody.truncated,
+            response_body_size: responseBody.size,
+            status: row.status,
+            error_message: row.error_message,
+            duration_ms: row.duration_ms
+        };
+    });
 
     return { items, total, page, pageSize };
 }
@@ -184,6 +222,9 @@ export function getDetail(id) {
     const row = stmt.get(id);
     if (!row) return null;
 
+    const requestBody = buildBodyPreview(row.request_body);
+    const responseBody = buildBodyPreview(row.response_body);
+
     return {
         id: row.id,
         created_at: row.created_at,
@@ -191,12 +232,27 @@ export function getDetail(id) {
         endpoint_path: row.endpoint_path,
         request_summary: row.request_summary,
         request_body: safeParseJson(row.request_body, null),
+        request_body_preview: requestBody.preview,
+        request_body_truncated: requestBody.truncated,
+        request_body_size: requestBody.size,
         response_summary: row.response_summary,
         response_body: safeParseJson(row.response_body, null),
+        response_body_preview: responseBody.preview,
+        response_body_truncated: responseBody.truncated,
+        response_body_size: responseBody.size,
         status: row.status,
         error_message: row.error_message,
         duration_ms: row.duration_ms
     };
+}
+
+export function getBodyText(id, kind) {
+    const db = getDb();
+    const field = kind === 'response' ? 'response_body' : 'request_body';
+    const stmt = db.prepare(`SELECT ${field} AS body FROM requests WHERE id = ?`);
+    const row = stmt.get(id);
+    if (!row) return null;
+    return typeof row.body === 'string' ? row.body : null;
 }
 
 export async function deleteRecords(ids) {

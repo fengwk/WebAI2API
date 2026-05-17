@@ -4,14 +4,17 @@ logLevel: info
 server:
   # 监听端口
   port: 3000
-  # 鉴权 API Token 至少为 10 个字符 (可使用 npm run genkey 生成)
-  # 该配置会对 API 接口和 WebUI 生效
-  auth: sk-change-me-to-your-secure-key
+  # 内置鉴权已移除，如需访问控制请通过前置网关处理。
   # 当脚本通过 helper 输出 URL 文件时，拼接外部可访问地址的基准 URL。
   # 例如部署在反代前缀 /proxy/gpt-image 下时，可配置为：
   # https://gpt-load.kk1.fun/proxy/gpt-image
   # 留空时返回站内相对路径 /files/...
   publicFileBaseUrl: ""
+  # WebUI 中 curl 示例使用的外部 API 基准地址。
+  # 例如 WebUI 走内网访问，但希望复制出的 curl 指向公网域名时可配置：
+  # https://webai2api.kk1.fun
+  # 留空时使用当前打开 WebUI 的页面 origin。
+  publicApiBaseUrl: ""
 
 backend:
   # ========================================

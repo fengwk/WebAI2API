@@ -51,9 +51,6 @@ const {
 /** @type {number} 服务器端口 */
 const PORT = config.server?.port || 3000;
 
-/** @type {string} 认证令牌 */
-const AUTH_TOKEN = config.server?.auth;
-
 /** @type {number} 最大并发数 */
 const MAX_CONCURRENT = config.queue?.maxConcurrent || 1;
 
@@ -98,7 +95,6 @@ let safeMode = false;
 let safeModeReason = null;
 
 const handleRequest = createGlobalRouter({
-    authToken: AUTH_TOKEN,
     backendName,
     tempDir: TEMP_DIR,
     queueManager,
@@ -151,7 +147,7 @@ async function startServer() {
         // 只处理 /admin/vnc 路径
         if (url.pathname === '/admin/vnc') {
             const { handleVncUpgrade } = await import('./api/admin/vncProxy.js');
-            await handleVncUpgrade(req, socket, head, AUTH_TOKEN);
+            await handleVncUpgrade(req, socket, head);
         } else {
             socket.destroy();
         }

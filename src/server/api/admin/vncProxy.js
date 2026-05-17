@@ -39,21 +39,8 @@ function writeCloseFrame(socket, code = WS_CLOSE_NORMAL, reason = '') {
  * @param {import('http').IncomingMessage} req - HTTP 请求
  * @param {import('net').Socket} socket - 原始 TCP socket
  * @param {Buffer} head - 升级请求的头部数据
- * @param {string} authToken - 有效的认证令牌
  */
-export async function handleVncUpgrade(req, socket, head, authToken) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-
-    // 验证 token
-    if (authToken) {
-        const token = url.searchParams.get('token');
-        if (token !== authToken) {
-            socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-            socket.destroy();
-            return;
-        }
-    }
-
+export async function handleVncUpgrade(req, socket, head) {
     const protocol = negotiateSubprotocol(req);
     if (req.headers['sec-websocket-protocol'] && !protocol) {
         socket.write('HTTP/1.1 426 Upgrade Required\r\n\r\n');

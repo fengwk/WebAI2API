@@ -6,13 +6,11 @@ import {
   DashboardOutlined,
   SettingOutlined,
   ToolOutlined,
-  PoweroffOutlined,
   GithubOutlined,
   MenuOutlined,
   RocketOutlined
 } from '@ant-design/icons-vue';
 import { useSettingsStore } from '@/stores/settings';
-import LoginModal from '@/components/auth/LoginModal.vue';
 
 const router = useRouter();
 const route = useRoute();
@@ -21,9 +19,6 @@ const settingsStore = useSettingsStore();
 const selectedKeys = ref(['dash']);
 const collapsed = ref(false);
 const isMobile = ref(false);
-const loginVisible = ref(false);
-const iconLoading = ref(false);
-const isInitializing = ref(true);
 let screenResizeHandler = null;
 
 const menuRoutes = {
@@ -62,15 +57,6 @@ const handleMenuClick = ({ key }) => {
   }
 };
 
-const logout = () => {
-  iconLoading.value = true;
-  settingsStore.setToken('');
-  setTimeout(() => {
-    iconLoading.value = false;
-    loginVisible.value = true;
-  }, 300);
-};
-
 let connectionCheckInterval = null;
 let disconnectModalShown = false;
 
@@ -107,20 +93,6 @@ onMounted(async () => {
   screenResizeHandler();
   window.addEventListener('resize', screenResizeHandler);
 
-  try {
-    if (!settingsStore.token) {
-      loginVisible.value = true;
-    } else {
-      const isValid = await settingsStore.checkAuth();
-      if (!isValid) {
-        settingsStore.setToken('');
-        loginVisible.value = true;
-      }
-    }
-  } finally {
-    isInitializing.value = false;
-  }
-
   connectionCheckInterval = setInterval(checkConnection, 5000);
 });
 
@@ -135,10 +107,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <a-spin v-if="isInitializing" :spinning="isInitializing" tip="正在验证身份..." size="large"
-    style="height: 100vh; display: flex; align-items: center; justify-content: center;" />
-  <div v-else>
-    <LoginModal v-model:visible="loginVisible" />
+  <div>
     <a-layout style="min-height: 100vh" theme="light">
       <a-layout-header class="header"
         :style="{ background: 'rgba(255, 255, 255, 0.7)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)', borderBottom: '1.5px solid rgba(0, 0, 0, 0.05)', display: 'flex', alignItems: 'center', padding: isMobile ? '0 12px' : '0 24px', position: 'fixed', width: '100%', top: 0, zIndex: 1000 }">
@@ -148,12 +117,7 @@ onUnmounted(() => {
         <div class="logo" :style="{ fontSize: '1.25rem', fontWeight: 'bold', color: '#1890ff', marginRight: isMobile ? '8px' : '24px' }">
           WebAI2API
         </div>
-        <a-flex justify="end" align="center" style="flex: 1;" :gap="8">
-          <a-button danger :loading="iconLoading" @click="logout" :size="isMobile ? 'small' : 'middle'">
-            <template #icon><PoweroffOutlined /></template>
-            <span v-if="!isMobile">退出登录</span>
-          </a-button>
-        </a-flex>
+        <div style="flex: 1;"></div>
       </a-layout-header>
 
       <a-layout style="margin-top: 64px;">

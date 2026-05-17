@@ -233,6 +233,68 @@ async function waitForAssistantOutcome(page, timeout, existingAssistantTextKeys,
   throw new Error('等待生成结果超时');
 }
 
+async function waitForImageDownloadMetadata(page, timeout, api) {
+  const response = await page.waitForResponse((item) => {
+    if (item.request().method() !== 'GET') return false;
+    try {
+      const url = new URL(item.url());
+      return url.origin === 'https://chatgpt.com' && url.pathname.includes('/backend-api/files/download/');
+    } catch {
+      return false;
+    }
+  }, { timeout });
+
+  const payload = await response.json();
+  if (payload?.status !== 'success' || !payload?.download_url) {
+    throw new Error('图片下载元数据无效');
+  }
+
+  api.log('info', '捕获图片下载元数据', {
+    fileName: payload.file_name || '',
+    downloadPreview: String(payload.download_url || '').slice(0, 160)
+  });
+  return payload;
+}
+
+function pickDownloadFileName(payload) {
+  const raw = String(payload?.file_name || '').trim();
+  const leaf = raw.split('/').filter(Boolean).pop();
+  return leaf || 'result.png';
+}
+
+async function extractImageFileFromDownloadMetadata(ctx, payload) {
+  const { page, api, helpers } = ctx;
+  const downloadUrl = String(payload?.download_url || '').trim();
+  if (!downloadUrl) {
+    throw new Error('下载元数据中缺少 download_url');
+  }
+
+  api.log('info', '使用下载接口返回的图源', {
+    fileName: pickDownloadFileName(payload),
+    downloadPreview: downloadUrl.slice(0, 160)
+  });
+
+  const dataUrl = await page.evaluate(async (remoteUrl) => {
+    const response = await fetch(remoteUrl, { credentials: 'include' });
+    if (!response.ok) {
+      throw new Error(`浏览器内下载失败: HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }, downloadUrl);
+
+  return await helpers.files.fromDataUrl(dataUrl, {
+    mode: 'object',
+    fileName: pickDownloadFileName(payload),
+    mimeType: payload?.mime_type || 'image/png'
+  });
+}
+
 async function getUploadTileCount(page) {
   const locator = page.locator('button[aria-label*="用户上传的图片"], button[aria-label*="uploaded image"], button[aria-label*="Uploaded image"]');
   return await locator.count().catch(() => 0);
@@ -281,6 +343,64 @@ function buildPrompt(input) {
   const size = String(input.size || '').trim();
   if (!size) return prompt;
   return `${prompt}\n\n将宽高比设置为${size}`;
+}
+
+function extractConversationText(rawText) {
+  const lines = String(rawText || '').split(/\r?\n/);
+  let currentEvent = '';
+  let captureAssistantText = false;
+  let text = '';
+
+  const appendText = (value) => {
+    if (typeof value !== 'string' || !value) return;
+    text += value;
+  };
+
+  for (const line of lines) {
+    if (line.startsWith('event:')) {
+      currentEvent = line.slice(6).trim();
+      continue;
+    }
+
+    if (!line.startsWith('data:')) continue;
+    const payloadText = line.slice(5).trim();
+    if (!payloadText || payloadText === '[DONE]' || currentEvent !== 'delta') continue;
+
+    let payload;
+    try {
+      payload = JSON.parse(payloadText);
+    } catch {
+      continue;
+    }
+
+    const message = payload?.v?.message;
+    if (message) {
+      captureAssistantText = message.author?.role === 'assistant' && message.content?.content_type === 'text';
+      if (captureAssistantText) {
+        for (const part of message.content?.parts || []) {
+          appendText(part);
+        }
+      }
+      continue;
+    }
+
+    if (!captureAssistantText) continue;
+
+    if (payload.o === 'append') {
+      appendText(payload.v);
+      continue;
+    }
+
+    if (payload.o === 'patch' && Array.isArray(payload.v)) {
+      for (const op of payload.v) {
+        if (op?.o === 'append') {
+          appendText(op.v);
+        }
+      }
+    }
+  }
+
+  return text.trim();
 }
 
 async function setComposerPrompt(page, composer, prompt) {
@@ -374,7 +494,37 @@ async function extractImageFile(ctx, imageLocator) {
     return await helpers.files.fromDataUrl(dataUrl, { mode: 'object', fileName: 'result.png' });
   }
 
-  return await helpers.files.fromUrl(source, { mode: 'object', fileName: 'result.png' });
+  try {
+    const pageOrigin = new URL(page.url()).origin;
+    const sourceUrl = new URL(source);
+    if (sourceUrl.origin === pageOrigin || sourceUrl.pathname.startsWith('/backend-api/')) {
+      api.log('info', '检测到受保护图源，改用页面上下文下载');
+      const dataUrl = await page.evaluate(async (remoteUrl) => {
+        const response = await fetch(remoteUrl, { credentials: 'include' });
+        if (!response.ok) {
+          throw new Error(`浏览器内下载失败: HTTP ${response.status}`);
+        }
+        const blob = await response.blob();
+        return await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }, source);
+      return await helpers.files.fromDataUrl(dataUrl, { mode: 'object', fileName: 'result.png' });
+    }
+
+    return await helpers.files.fromUrl(source, { mode: 'object', fileName: 'result.png' });
+  } catch (error) {
+    api.log('warn', '下载原图失败，回退为元素截图导出', { error: error.message });
+    const buffer = await imageLocator.screenshot({ type: 'png' });
+    return await helpers.files.fromBuffer(buffer, {
+      mode: 'object',
+      fileName: 'result.png',
+      mimeType: 'image/png'
+    });
+  }
 }
 
 async function executeChatgpt(ctx, input) {
@@ -406,12 +556,21 @@ async function executeChatgpt(ctx, input) {
 
   const existingImageKeys = await collectExistingGeneratedImageKeys(page);
   const existingAssistantTextKeys = await collectExistingAssistantTextKeys(page);
+  const generationTimeout = Math.max(waitTimeout, 180000);
 
   const conversationPromise = page.waitForResponse((response) => {
     return response.url().includes('backend-api/f/conversation') && response.request().method() === 'POST';
   }, { timeout: waitTimeout });
+  const downloadMetadataPromise = waitForImageDownloadMetadata(page, generationTimeout, api);
+  const downloadSignalPromise = downloadMetadataPromise
+    .then((payload) => ({ kind: 'download', payload }))
+    .catch((error) => {
+      api.log('debug', '等待图片下载元数据未命中，继续使用 DOM 回退', { error: error.message });
+      return new Promise(() => { });
+    });
 
-  const outcomePromise = waitForAssistantOutcome(page, Math.max(waitTimeout, 180000), existingAssistantTextKeys, existingImageKeys, api);
+  const outcomePromise = waitForAssistantOutcome(page, generationTimeout, existingAssistantTextKeys, existingImageKeys, api);
+  outcomePromise.catch(() => { });
   await submitPrompt(page, api);
 
   let conversationText = '';
@@ -427,15 +586,32 @@ async function executeChatgpt(ctx, input) {
     }
   }
 
-  const outcome = await outcomePromise;
-  if (outcome.type === 'error') {
-    throw helpers.apiError({ message: outcome.text, status: 400, retryable: false });
-  }
-  if (outcome.type === 'text') {
-    throw helpers.apiError({ message: outcome.text, status: 400, retryable: false });
+  const firstResolved = await Promise.race([
+    downloadSignalPromise,
+    outcomePromise.then((outcome) => ({ kind: 'dom', outcome }))
+  ]);
+
+  let image;
+  if (firstResolved.kind === 'download') {
+    image = await extractImageFileFromDownloadMetadata(ctx, firstResolved.payload);
+  } else {
+    const outcome = firstResolved.outcome;
+    if (outcome.type === 'error') {
+      throw helpers.apiError({ message: outcome.text, status: 400, retryable: false });
+    }
+    if (outcome.type === 'text') {
+      throw helpers.apiError({ message: outcome.text, status: 400, retryable: false });
+    }
+
+    const metadata = await Promise.race([
+      downloadMetadataPromise.catch(() => null),
+      sleep(5000).then(() => null)
+    ]);
+    image = metadata
+      ? await extractImageFileFromDownloadMetadata(ctx, metadata)
+      : await extractImageFile(ctx, outcome.imageLocator);
   }
 
-  const image = await extractImageFile(ctx, outcome.imageLocator);
   return { image, conversationText };
 }
 

@@ -39,6 +39,7 @@ import { getTodayStats, getStatsRange, clearStatsRange } from '../../../utils/st
 import {
     getList as getHistoryList,
     getDetail as getHistoryDetail,
+    getBodyText as getHistoryBodyText,
     deleteRecords as deleteHistoryRecords,
     deleteByDateRange as deleteHistoryByDateRange
 } from '../../../utils/history.js';
@@ -699,6 +700,30 @@ export function createAdminRouter(context) {
                 } else {
                     sendApiError(res, { code: ERROR_CODES.NOT_FOUND, message: '记录不存在', status: 404 });
                 }
+                return;
+            }
+
+            const historyBodyDownloadMatch = pathname.match(/^\/history\/([^/]+)\/(request|response)-body$/);
+            if (method === 'GET' && historyBodyDownloadMatch) {
+                const id = historyBodyDownloadMatch[1];
+                const bodyType = historyBodyDownloadMatch[2];
+                const bodyText = getHistoryBodyText(id, bodyType);
+                if (bodyText === null) {
+                    sendApiError(res, {
+                        code: ERROR_CODES.NOT_FOUND,
+                        message: bodyType === 'request' ? '请求体不存在' : '响应体不存在',
+                        status: 404
+                    });
+                    return;
+                }
+
+                const fileName = `history-${id}-${bodyType}-body.json`;
+                res.writeHead(200, {
+                    'Content-Type': 'application/json; charset=utf-8',
+                    'Content-Disposition': `attachment; filename="${fileName}"`,
+                    'Cache-Control': 'no-cache'
+                });
+                res.end(bodyText);
                 return;
             }
 

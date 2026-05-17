@@ -6,12 +6,10 @@ import {
     ReloadOutlined,
     DeleteOutlined,
     EyeOutlined,
-    CheckCircleOutlined,
-    CloseCircleOutlined,
-    ClockCircleOutlined,
     RocketOutlined,
     CopyOutlined,
-    RedoOutlined
+    RedoOutlined,
+    DownloadOutlined
 } from '@ant-design/icons-vue';
 import SchemaField from './SchemaField.vue';
 
@@ -92,6 +90,10 @@ const selectedAdapter = computed(() => adapters.value.find(item => item.id === s
 const adapterEndpoint = computed(() => selectedAdapter.value?.endpoint || (selectedAdapter.value ? `/api/${selectedAdapter.value.id}` : ''));
 const adapterInputSchema = computed(() => selectedAdapter.value?.inputJsonSchema || null);
 const adapterOutputSchema = computed(() => selectedAdapter.value?.outputJsonSchema || null);
+const curlBaseUrl = computed(() => {
+    const configured = String(settingsStore.serverConfig?.publicApiBaseUrl || '').trim();
+    return configured || window.location.origin;
+});
 
 const historyColumns = [
     { title: '状态', dataIndex: 'status', key: 'status', width: 80, align: 'center' },
@@ -154,14 +156,38 @@ watch([statusFilter, adapterFilter], () => {
     fetchHistory();
 });
 
-function buildCurlCommand() {
+function buildCurlCommandLegacy() {
     if (!selectedAdapter.value) return '';
     const tokenHeader = settingsStore.token
-        ? `  -H "Authorization: Bearer ${settingsStore.token}" \\\n+`
+        ? `  -H "Authorization: Bearer ${settingsStore.token}" \\\n`
         : '';
-    return `curl -X POST ${window.location.origin}${adapterEndpoint.value} \\
+    return `curl -X POST ${curlBaseUrl.value}${adapterEndpoint.value} \\
 ${tokenHeader}  -H "Content-Type: application/json" \\
   -d '${JSON.stringify(formValue.value)}'`;
+}
+
+function buildCurlCommand() {
+    if (!selectedAdapter.value) return '';
+    return [
+        `curl -X POST ${curlBaseUrl.value}${adapterEndpoint.value} \\`,
+        '  -H "Content-Type: application/json" \\',
+        `  -d '${JSON.stringify(formValue.value)}'`
+    ].filter(Boolean).join('\n');
+}
+
+function formatBodyPreview(preview, truncated, size) {
+    if (!preview) return '-';
+    if (!truncated) return preview;
+    return `${preview}\n\n...（仅展示前 1024 个字符，完整内容请在详情中下载；原始长度 ${size} 个字符）`;
+}
+
+async function fetchHistoryDetailById(id) {
+    const res = await fetch(`/admin/history/${id}`, { headers: settingsStore.getHeaders() });
+    if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.error?.message || payload.message || `获取详情失败: HTTP ${res.status}`);
+    }
+    return await res.json();
 }
 
 async function fetchAdapters() {
@@ -254,10 +280,7 @@ async function viewDetail(record) {
     drawerVisible.value = true;
     detailLoading.value = true;
     try {
-        const res = await fetch(`/admin/history/${record.id}`, { headers: settingsStore.getHeaders() });
-        if (res.ok) {
-            currentRecord.value = await res.json();
-        }
+        currentRecord.value = await fetchHistoryDetailById(record.id);
     } catch (e) {
         message.error(`获取详情失败: ${e.message}`);
     } finally {
@@ -286,13 +309,47 @@ function deleteRecord(record) {
     });
 }
 
-function resendRecord(record) {
-    if (!record.request_body || !record.adapter_id) {
+async function resendRecord(record) {
+    if (!record.adapter_id) {
         message.warning('该记录缺少可重发的请求体');
         return;
     }
-    selectedAdapterId.value = record.adapter_id;
-    formValue.value = deepClone(record.request_body);
+
+    try {
+        const detail = record.request_body ? record : await fetchHistoryDetailById(record.id);
+        if (!detail.request_body) {
+            message.warning('该记录缺少可重发的请求体');
+            return;
+        }
+        selectedAdapterId.value = detail.adapter_id;
+        formValue.value = deepClone(detail.request_body);
+    } catch (e) {
+        message.error(`读取重发内容失败: ${e.message}`);
+    }
+}
+
+async function downloadHistoryBody(record, kind) {
+    try {
+        const res = await fetch(`/admin/history/${record.id}/${kind}-body`, {
+            headers: settingsStore.getHeaders()
+        });
+        if (!res.ok) {
+            const payload = await res.json().catch(() => ({}));
+            throw new Error(payload.error?.message || payload.message || `下载失败: HTTP ${res.status}`);
+        }
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `history-${record.id}-${kind}-body.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        message.error(`下载失败: ${e.message}`);
+    }
 }
 
 async function copyText(content) {
@@ -311,7 +368,7 @@ function handleTableChange(pagination) {
 }
 
 onMounted(async () => {
-    await Promise.all([fetchAdapters(), fetchHistory()]);
+    await Promise.all([fetchAdapters(), fetchHistory(), settingsStore.fetchServerConfig()]);
     startAutoRefresh();
 });
 
@@ -433,12 +490,12 @@ onUnmounted(() => {
                     </div>
                 </template>
                 <template v-else-if="column.key === 'request_summary'">
-                    <div class="multiline-text clickable" @click="previewText('请求体预览', record.request_body || record.request_summary)">
+                    <div class="multiline-text clickable" @click="previewText('请求体预览', record.request_body_preview ? formatBodyPreview(record.request_body_preview, record.request_body_truncated, record.request_body_size) : record.request_summary)">
                         {{ truncateText(record.request_summary, 160) }}
                     </div>
                 </template>
                 <template v-else-if="column.key === 'response_summary'">
-                    <div class="multiline-text clickable" :class="{ 'error-text': record.status === 'failed' }" @click="previewText('响应预览', record.status === 'failed' ? record.error_message : (record.response_body || record.response_summary))">
+                    <div class="multiline-text clickable" :class="{ 'error-text': record.status === 'failed' }" @click="previewText('响应预览', record.status === 'failed' ? record.error_message : (record.response_body_preview ? formatBodyPreview(record.response_body_preview, record.response_body_truncated, record.response_body_size) : record.response_summary))">
                         {{ truncateText(record.status === 'failed' ? record.error_message : record.response_summary, 180) }}
                     </div>
                 </template>
@@ -480,9 +537,21 @@ onUnmounted(() => {
                 </a-descriptions>
 
                 <a-divider orientation="left">请求体</a-divider>
+                <a-space style="margin-bottom: 8px;">
+                    <a-button size="small" @click="downloadHistoryBody(currentRecord, 'request')">
+                        <template #icon><DownloadOutlined /></template>
+                        下载完整请求体
+                    </a-button>
+                </a-space>
                 <pre class="json-box">{{ JSON.stringify(currentRecord.request_body, null, 2) }}</pre>
 
                 <a-divider orientation="left">响应</a-divider>
+                <a-space v-if="currentRecord.response_body" style="margin-bottom: 8px;">
+                    <a-button size="small" @click="downloadHistoryBody(currentRecord, 'response')">
+                        <template #icon><DownloadOutlined /></template>
+                        下载完整响应体
+                    </a-button>
+                </a-space>
                 <pre v-if="currentRecord.status === 'failed'" class="json-box error-box">{{ currentRecord.error_message }}</pre>
                 <pre v-else class="json-box">{{ JSON.stringify(currentRecord.response_body, null, 2) }}</pre>
             </template>

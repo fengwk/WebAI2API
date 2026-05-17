@@ -7,7 +7,6 @@ import fs from 'fs';
 import path from 'path';
 import { createAdapterRouter } from './adapter/routes.js';
 import { createAdminRouter } from './admin/routes.js';
-import { createAuthMiddleware } from '../middlewares/auth.js';
 
 const MIME_TYPES = {
     '.html': 'text/html; charset=utf-8',
@@ -31,8 +30,7 @@ const WEBUI_DIR = path.join(process.cwd(), 'webui', 'dist');
 const PUBLIC_FILES_DIR = path.join(process.cwd(), 'data', 'files');
 
 export function createGlobalRouter(context) {
-    const { authToken, config, queueManager, tempDir, loginMode, getSafeMode } = context;
-    const checkAuth = createAuthMiddleware(authToken);
+    const { config, queueManager, tempDir, loginMode, getSafeMode } = context;
     const handleAdapterRequest = loginMode ? null : createAdapterRouter(context);
     const handleAdminRequest = createAdminRouter({ config, queueManager, tempDir, getSafeMode });
 
@@ -92,10 +90,6 @@ export function createGlobalRouter(context) {
                 res.end(content);
                 return;
             }
-        }
-
-        if (!checkAuth(req, res)) {
-            return;
         }
 
         if (pathname.startsWith('/admin')) {

@@ -3,7 +3,6 @@ import { message, Modal } from 'ant-design-vue';
 
 export const useSettingsStore = defineStore('settings', {
     state: () => ({
-        token: localStorage.getItem('admin_token') || '',
         serverConfig: {},
         browserConfig: {},
         workerConfig: [],
@@ -20,32 +19,8 @@ export const useSettingsStore = defineStore('settings', {
     }),
 
     actions: {
-        setToken(token) {
-            this.token = token;
-            if (token) {
-                localStorage.setItem('admin_token', token);
-            } else {
-                localStorage.removeItem('admin_token');
-            }
-        },
-
         getHeaders() {
-            const headers = { 'Content-Type': 'application/json' };
-            if (this.token) {
-                headers['Authorization'] = `Bearer ${this.token}`;
-            }
-            return headers;
-        },
-
-        async checkAuth() {
-            try {
-                const res = await fetch('/admin/status', {
-                    headers: this.getHeaders()
-                });
-                return res.status !== 401;
-            } catch (e) {
-                return false;
-            }
+            return { 'Content-Type': 'application/json' };
         },
 
         // 错误处理辅助函数

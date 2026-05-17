@@ -23,15 +23,6 @@ export function validateServerConfig(data) {
         }
     }
 
-    // Auth Token 校验：允许留空，但非空时必须至少 10 个字符
-    if (data.authToken !== undefined) {
-        if (typeof data.authToken !== 'string') {
-            errors.push('authToken 必须是字符串');
-        } else if (data.authToken.length > 0 && data.authToken.length < 10) {
-            errors.push('authToken 如果设置则必须至少 10 个字符，或留空');
-        }
-    }
-
     // Log Level 校验
     if (data.logLevel !== undefined) {
         if (!['debug', 'info', 'warn', 'error'].includes(data.logLevel)) {
@@ -53,6 +44,14 @@ export function validateServerConfig(data) {
             errors.push('publicFileBaseUrl 必须是字符串');
         } else if (data.publicFileBaseUrl && !/^https?:\/\//i.test(data.publicFileBaseUrl)) {
             errors.push('publicFileBaseUrl 必须以 http:// 或 https:// 开头，或留空');
+        }
+    }
+
+    if (data.publicApiBaseUrl !== undefined) {
+        if (typeof data.publicApiBaseUrl !== 'string') {
+            errors.push('publicApiBaseUrl 必须是字符串');
+        } else if (data.publicApiBaseUrl && !/^https?:\/\//i.test(data.publicApiBaseUrl)) {
+            errors.push('publicApiBaseUrl 必须以 http:// 或 https:// 开头，或留空');
         }
     }
 

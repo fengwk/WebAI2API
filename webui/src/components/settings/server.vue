@@ -1,17 +1,16 @@
 <script setup>
 import { onMounted, reactive } from 'vue';
 import { useSettingsStore } from '@/stores/settings';
-import { Modal, message } from 'ant-design-vue';
 
 const settingsStore = useSettingsStore();
 
 // 表单数据
 const formData = reactive({
     port: 3000,
-    authToken: '',
     logLevel: 'info',
     queueBuffer: 2,
-    publicFileBaseUrl: ''
+    publicFileBaseUrl: '',
+    publicApiBaseUrl: ''
 });
 
 onMounted(async () => {
@@ -24,28 +23,8 @@ const doSave = async () => {
     await settingsStore.saveServerConfig(formData);
 };
 
-// 保存设置 (带校验和确认弹窗)
+// 保存设置
 const handleSave = async () => {
-    // 前端校验：Token 长度在 1-9 之间时提示
-    if (formData.authToken && formData.authToken.length > 0 && formData.authToken.length < 10) {
-        message.error('鉴权 Token 如果设置则必须至少 10 个字符，或留空');
-        return;
-    }
-
-    // Token 留空时弹出确认框
-    if (!formData.authToken) {
-        Modal.confirm({
-            title: '安全警告',
-            content: '您正在将鉴权 Token 留空，这意味着 API 和 WebUI 将无需认证即可访问。请勿在公网环境中使用此配置！确定要继续吗？',
-            okText: '确定留空',
-            okType: 'danger',
-            cancelText: '取消',
-            onOk: doSave
-        });
-        return;
-    }
-
-    // 正常保存
     await doSave();
 };
 </script>
@@ -64,17 +43,6 @@ const handleSave = async () => {
                         </div>
                         <a-input-number v-model:value="formData.port" :min="1" :max="65535" placeholder="请输入端口号"
                             style="width: 100%" />
-                    </div>
-                </a-col>
-
-                <!-- 鉴权 Token -->
-                <a-col :xs="24" :md="12">
-                    <div style="margin-bottom: 8px;">
-                        <div style="font-weight: 600; margin-bottom: 4px;">鉴权 Token</div>
-                        <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
-                            用于 API 请求鉴权的密钥，留空则不启用鉴权
-                        </div>
-                        <a-input-password v-model:value="formData.authToken" placeholder="请输入 Token" type="password" />
                     </div>
                 </a-col>
 
@@ -103,6 +71,17 @@ const handleSave = async () => {
                             例如: https://gpt-load.kk1.fun/proxy/gpt-image
                         </div>
                         <a-input v-model:value="formData.publicFileBaseUrl" placeholder="留空则返回 /files/... 相对路径" />
+                    </div>
+                </a-col>
+
+                <a-col :xs="24" :md="12">
+                    <div style="margin-bottom: 8px;">
+                        <div style="font-weight: 600; margin-bottom: 4px;">API 基准地址</div>
+                        <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
+                            WebUI 里 curl 示例使用的外部 API 前缀。<br>
+                            例如: https://webai2api.kk1.fun
+                        </div>
+                        <a-input v-model:value="formData.publicApiBaseUrl" placeholder="留空则使用当前页面的 http:// 或 https:// 前缀" />
                     </div>
                 </a-col>
             </a-row>

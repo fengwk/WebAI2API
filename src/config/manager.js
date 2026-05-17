@@ -45,9 +45,9 @@ export function getServerConfig() {
     const config = readRawConfig();
     return {
         port: config.server?.port || 3000,
-        authToken: config.server?.auth || '',
         logLevel: config.logLevel || 'info',
-        publicFileBaseUrl: config.server?.publicFileBaseUrl || ''
+        publicFileBaseUrl: config.server?.publicFileBaseUrl || '',
+        publicApiBaseUrl: config.server?.publicApiBaseUrl || ''
     };
 }
 
@@ -59,11 +59,12 @@ export function saveServerConfig(data) {
     const config = readRawConfig();
 
     if (!config.server) config.server = {};
+    if ('auth' in config.server) delete config.server.auth;
 
     if (data.port !== undefined) config.server.port = data.port;
-    if (data.authToken !== undefined) config.server.auth = data.authToken;
     if (data.logLevel !== undefined) config.logLevel = data.logLevel;
     if (data.publicFileBaseUrl !== undefined) config.server.publicFileBaseUrl = data.publicFileBaseUrl;
+    if (data.publicApiBaseUrl !== undefined) config.server.publicApiBaseUrl = data.publicApiBaseUrl;
 
     writeConfig(config);
 }
