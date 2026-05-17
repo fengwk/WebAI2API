@@ -345,6 +345,13 @@ function buildPrompt(input) {
   return `${prompt}\n\n将宽高比设置为${size}`;
 }
 
+function normalizeOutputImage(file) {
+  return {
+    mimeType: file.mimeType,
+    base64: file.base64
+  };
+}
+
 function extractConversationText(rawText) {
   const lines = String(rawText || '').split(/\r?\n/);
   let currentEvent = '';
@@ -612,7 +619,7 @@ async function executeChatgpt(ctx, input) {
       : await extractImageFile(ctx, outcome.imageLocator);
   }
 
-  return { image, conversationText };
+  return { image: normalizeOutputImage(image), conversationText };
 }
 
 export const manifest = {
@@ -641,7 +648,7 @@ export const manifest = {
         'x-accept': 'image/*',
         items: {
           type: 'object',
-          required: ['fileName', 'mimeType', 'base64'],
+          required: ['mimeType', 'base64'],
           properties: {
             fileName: { type: 'string' },
             mimeType: { type: 'string' },
@@ -657,7 +664,7 @@ export const manifest = {
     properties: {
       image: {
         type: 'object',
-        required: ['fileName', 'mimeType', 'base64'],
+        required: ['mimeType', 'base64'],
         properties: {
           fileName: { type: 'string' },
           mimeType: { type: 'string' },

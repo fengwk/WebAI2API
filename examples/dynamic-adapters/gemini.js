@@ -157,6 +157,13 @@ function buildPrompt(input) {
   return `${prompt}\n\n将宽高比设置为${size}`;
 }
 
+function normalizeOutputImage(file) {
+  return {
+    mimeType: file.mimeType,
+    base64: file.base64
+  };
+}
+
 async function executeGemini(ctx, input) {
   const { page, api, config, helpers } = ctx;
   const waitTimeout = config?.backend?.pool?.waitTimeout ?? 120000;
@@ -214,7 +221,7 @@ async function executeGemini(ctx, input) {
     fileName: 'gemini-result.png',
     mimeType: 'image/png'
   });
-  return { image };
+  return { image: normalizeOutputImage(image) };
 }
 
 export const manifest = {
@@ -243,7 +250,7 @@ export const manifest = {
         'x-accept': 'image/*',
         items: {
           type: 'object',
-          required: ['fileName', 'mimeType', 'base64'],
+          required: ['mimeType', 'base64'],
           properties: {
             fileName: { type: 'string' },
             mimeType: { type: 'string' },
@@ -259,7 +266,7 @@ export const manifest = {
     properties: {
       image: {
         type: 'object',
-        required: ['fileName', 'mimeType', 'base64'],
+        required: ['mimeType', 'base64'],
         properties: {
           fileName: { type: 'string' },
           mimeType: { type: 'string' },
