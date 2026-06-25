@@ -182,6 +182,8 @@ function handleDelete() {
                 await refreshAdapters();
             } catch (e) {
                 Modal.error({ title: '删除失败', content: e.message });
+                selectedAdapterId.value = targetId;
+                await refreshAdapters();
             } finally {
                 deleting.value = false;
             }

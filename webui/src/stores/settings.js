@@ -236,6 +236,11 @@ export const useSettingsStore = defineStore('settings', {
             if (!res.ok) {
                 throw new Error(data.error?.message || data.message || `删除脚本失败: ${res.status}`);
             }
+            await this.fetchAdaptersMeta();
+            const stillExists = (this.adaptersMeta || []).some(item => item.id === adapterId);
+            if (stillExists) {
+                throw new Error('后端未真正删除，请检查服务端状态');
+            }
             message.success(data.message || '脚本已删除');
             return true;
         }

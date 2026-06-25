@@ -522,6 +522,10 @@ export function createAdminRouter(context) {
                     return;
                 }
                 await deleteAdapterSource(adapterId);
+                if (await adapterSourceExists(adapterId)) {
+                    sendApiError(res, { code: ERROR_CODES.SERVER_ERROR, message: '删除失败：文件仍存在', status: 500 });
+                    return;
+                }
                 await registry.reload();
                 sendJson(res, 200, { success: true, message: '适配器已删除' });
                 return;

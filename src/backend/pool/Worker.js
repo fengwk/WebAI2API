@@ -339,7 +339,32 @@ export class Worker {
      */
     async _navigateResidentPageToHome(page = this.page) {
         const homePageUrl = this.getHomePageUrl();
-        if (!homePageUrl || !page?.goto) return;
+        const manifest = registry.getAdapter(this.type);
+        logger.info('工作池', `[${this.name}] _navigateResidentPageToHome invoked`, {
+            type: this.type,
+            homePageUrl,
+            hasPage: !!page,
+            hasGoto: typeof page?.goto === 'function',
+            manifestExists: !!manifest,
+            manifestKeys: manifest ? Object.keys(manifest) : null,
+            manifestHomePageUrl: manifest?.homePageUrl,
+            registrySize: registry.adapters.size,
+            registryIds: Array.from(registry.adapters.keys())
+        });
+        if (!homePageUrl) {
+            logger.warn('工作池', `[${this.name}] _navigateResidentPageToHome: 未配置 homePageUrl，跳过`, {
+                type: this.type,
+                manifestExists: !!registry.getAdapter(this.type)
+            });
+            return;
+        }
+        if (!page?.goto) {
+            logger.error('工作池', `[${this.name}] _navigateResidentPageToHome: page 无效，跳过`, {
+                type: this.type,
+                homePageUrl
+            });
+            return;
+        }
         try {
             await page.goto(homePageUrl, { waitUntil: 'domcontentloaded' });
             logger.info('工作池', `[${this.name}] resident page 已打开 homePageUrl: ${homePageUrl}`);
@@ -445,6 +470,7 @@ export class Worker {
         if (humanizeCursorMode === true) {
             this.page.cursor = createCursor(this.page);
         }
+        await this._navigateResidentPageToHome(this.page);
 
         const isLoginMode = process.argv.some(arg => arg.startsWith('-login'));
         if (isLoginMode) {

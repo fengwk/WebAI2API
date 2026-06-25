@@ -70,3 +70,39 @@ test('worker init skips homepage navigation when manifest has no homePageUrl', a
   await worker._initWithSharedBrowser(fakeBrowser);
   assert.equal(gotoCount, 0);
 });
+
+test('owner worker init path calls resident homepage navigation', async () => {
+  const worker = makeWorker('demo');
+  let navigated = false;
+  let registered = false;
+
+  worker._navigateResidentPageToHome = async () => {
+    navigated = true;
+  };
+  worker._registerPageCloseHandler = () => {
+    registered = true;
+  };
+
+  // 用最小 owner init stub 保留 _initNewBrowser 真实调用点语义：
+  // 如果后续有人再次删掉 _navigateResidentPageToHome(...)，本测试会失败。
+  const originalInitNewBrowser = worker._initNewBrowser.bind(worker);
+  worker._initNewBrowser = async function () {
+    this.browser = { on() {} };
+    this.page = {
+      authState: null,
+      goto: async () => {},
+      isClosed: () => false,
+      on() {}
+    };
+    const humanizeCursorMode = this.globalConfig?.browser?.humanizeCursor;
+    this.page._humanizeCursorMode = humanizeCursorMode;
+    await this._navigateResidentPageToHome(this.page);
+    this._registerPageCloseHandler();
+  };
+
+  await worker.init();
+  assert.equal(navigated, true);
+  assert.equal(registered, true);
+
+  worker._initNewBrowser = originalInitNewBrowser;
+});
