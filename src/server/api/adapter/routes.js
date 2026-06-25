@@ -1,14 +1,38 @@
 /**
- * @fileoverview 动态适配器 API 路由
- * @description 固定暴露 POST /api/{adapter_id}，按适配器 schema 校验输入输出。
+ * @fileoverview 动态适配器 API 路由（新协议）
+ * @description
+ *   POST /api/{adapterId}
+ *
+ *   请求体（全部可选，input 透传给脚本）：
+ *     {
+ *       "input":           { ... },   // 业务输入
+ *       "debug":           false,     // 是否返回 trace
+ *       "workerId":        "xxx",     // 指定 worker（必须 type === adapterId）
+ *       "overrideScript":  "..."      // 本次执行时覆盖 manifest.script
+ *     }
+ *
+ *   返回 envelope：
+ *     {
+ *       "ok": true,
+ *       "data":  ...,
+ *       "meta":  { requestId, adapterId, workerId, instanceId, queuedMs, durationMs, page: { url, title } },
+ *       "trace": { steps, captures, logs }   // 仅 debug=true 时返回
+ *     }
+ *
+ *   失败：
+ *     {
+ *       "ok": false,
+ *       "message": "...",
+ *       "meta":   { ... },
+ *       "trace":  { ... }   // 仅 debug=true 时返回
+ *     }
  */
 
 import crypto from 'crypto';
 import { registry } from '../../../backend/registry.js';
-import { validateJsonSchema } from '../../../utils/jsonSchema.js';
 import { logger } from '../../../utils/logger.js';
 import { ERROR_CODES } from '../../errors.js';
-import { sendApiError } from '../../respond.js';
+import { sendApiError, sendJson } from '../../respond.js';
 
 function buildRequestId() {
     return crypto.randomUUID().slice(0, 8);
@@ -23,12 +47,12 @@ async function readJsonBody(req) {
     return body ? JSON.parse(body) : {};
 }
 
-function summarizeRequestBody(body) {
-    if (!body || typeof body !== 'object') return '';
-    if (typeof body.prompt === 'string' && body.prompt.trim()) {
-        return body.prompt.trim();
+function summarizeRequestBody(input) {
+    if (!input || typeof input !== 'object') return '';
+    if (typeof input.prompt === 'string' && input.prompt.trim()) {
+        return input.prompt.trim();
     }
-    return JSON.stringify(body, (key, value) => {
+    return JSON.stringify(input, (key, value) => {
         if (typeof value === 'string' && value.length > 160) {
             return `${value.slice(0, 160)}...`;
         }
@@ -36,15 +60,35 @@ function summarizeRequestBody(body) {
     });
 }
 
-function summarizeResponseBody(body) {
-    if (body === null || body === undefined) return '';
-    if (typeof body === 'string') return body;
-    return JSON.stringify(body, (key, value) => {
+function summarizeResponseBody(data) {
+    if (data === null || data === undefined) return '';
+    if (typeof data === 'string') return data;
+    return JSON.stringify(data, (key, value) => {
         if (typeof value === 'string' && value.length > 200) {
             return `${value.slice(0, 200)}...`;
         }
         return value;
     });
+}
+
+function normalizeRequestBody(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return { input: {}, debug: false, workerId: null, overrideScript: null };
+    }
+
+    const input = body.input && typeof body.input === 'object' && !Array.isArray(body.input)
+        ? body.input
+        : {};
+
+    const debug = body.debug === true;
+    const workerId = typeof body.workerId === 'string' && body.workerId.trim()
+        ? body.workerId.trim()
+        : null;
+    const overrideScript = typeof body.overrideScript === 'string' && body.overrideScript.trim()
+        ? body.overrideScript
+        : null;
+
+    return { input, debug, workerId, overrideScript };
 }
 
 export function createAdapterRouter(context) {
@@ -91,27 +135,22 @@ export function createAdapterRouter(context) {
                 return;
             }
 
-            const body = await readJsonBody(req);
-            const validationErrors = validateJsonSchema(adapter.inputJsonSchema, body, '$');
-            if (validationErrors.length > 0) {
-                sendApiError(res, {
-                    code: ERROR_CODES.INVALID_REQUEST_BODY,
-                    message: `输入校验失败: ${validationErrors.join('; ')}`,
-                    status: 400
-                });
-                return;
-            }
+            const rawBody = await readJsonBody(req);
+            const { input, debug, workerId, overrideScript } = normalizeRequestBody(rawBody);
 
+            // 入队：把新协议字段透传给 queue
             queueManager.addTask({
-                req,
                 res,
                 id: requestId,
                 adapterId,
                 adapter,
-                input: body,
+                input,
+                debug,
+                workerId,
+                overrideScript,
                 endpointPath: `/api/${adapterId}`,
-                requestSummary: summarizeRequestBody(body),
-                requestBody: body,
+                requestSummary: summarizeRequestBody(input),
+                requestBody: { input, debug, workerId, overrideScript: overrideScript ? '<override>' : null },
                 isStreaming: false
             });
         } catch (err) {
@@ -125,4 +164,4 @@ export function createAdapterRouter(context) {
     };
 }
 
-export { summarizeRequestBody, summarizeResponseBody };
+export { summarizeRequestBody, summarizeResponseBody, normalizeRequestBody };

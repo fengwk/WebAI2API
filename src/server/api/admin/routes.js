@@ -17,12 +17,8 @@ import {
     saveServerConfig,
     getBrowserConfig,
     saveBrowserConfig,
-    getQueueConfig,
-    saveQueueConfig,
     getInstancesConfig,
     saveInstancesConfig,
-    getAdaptersConfig,
-    saveAdaptersConfig,
     getPoolConfig,
     savePoolConfig
 } from '../../../config/manager.js';
@@ -30,8 +26,7 @@ import {
     validateServerConfig,
     validateBrowserConfig,
     validateInstancesConfig,
-    validatePoolConfig,
-    validateAdaptersConfig
+    validatePoolConfig
 } from '../../../config/validator.js';
 import { registry } from '../../../backend/registry.js';
 import { sendRestartSignal, sendStopSignal, isUnderSupervisor, getVncInfo } from '../../../utils/ipc.js';
@@ -52,48 +47,13 @@ import {
     deleteAdapterSource,
     importAdapterModule,
     normalizeAdapterId,
-    adapterSourceExists
+    adapterSourceExists,
+    getAdapterFilePath
 } from '../../../backend/adapterStore.js';
-
-function buildRequestId() {
-    return `adapter-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function getArtifactContentType(fileName) {
-    if (fileName.endsWith('.png')) return 'image/png';
-    if (fileName.endsWith('.jpg') || fileName.endsWith('.jpeg')) return 'image/jpeg';
-    if (fileName.endsWith('.gif')) return 'image/gif';
-    if (fileName.endsWith('.webp')) return 'image/webp';
-    if (fileName.endsWith('.html')) return 'text/html; charset=utf-8';
-    if (fileName.endsWith('.txt')) return 'text/plain; charset=utf-8';
-    return 'application/octet-stream';
-}
-
-function getDebugArtifactsRoot(tempDir) {
-    return path.join(tempDir, 'debug-artifacts');
-}
-
-async function ensureDebugArtifactsDir(tempDir) {
-    await fs.mkdir(getDebugArtifactsRoot(tempDir), { recursive: true });
-}
-
-async function cleanupDebugArtifacts(tempDir, ttlMs = 30 * 60 * 1000) {
-    const root = getDebugArtifactsRoot(tempDir);
-    try {
-        const entries = await fs.readdir(root, { withFileTypes: true });
-        const now = Date.now();
-        for (const entry of entries) {
-            if (!entry.isDirectory()) continue;
-            const fullPath = path.join(root, entry.name);
-            try {
-                const stat = await fs.stat(fullPath);
-                if (now - stat.mtimeMs > ttlMs) {
-                    await fs.rm(fullPath, { recursive: true, force: true });
-                }
-            } catch { }
-        }
-    } catch { }
-}
+import {
+    buildSourceFromStructured,
+    parseSourceToStructured
+} from '../../../backend/manifestSerializer.js';
 
 function buildAdapterMeta(manifest, valid = true, error = null) {
     return {
@@ -102,9 +62,10 @@ function buildAdapterMeta(manifest, valid = true, error = null) {
         valid,
         error,
         name: manifest.name || manifest.id,
+        description: manifest.description || null,
+        homePageUrl: manifest.homePageUrl || null,
         endpoint: `/api/${manifest.id}`,
-        inputJsonSchema: manifest.inputJsonSchema || null,
-        outputJsonSchema: manifest.outputJsonSchema || null
+        inputJsonSchema: manifest.inputJsonSchema || null
     };
 }
 
@@ -119,8 +80,7 @@ async function inspectAdapterFile(file) {
                 error: '未导出 manifest',
                 name: file.id,
                 endpoint: `/api/${file.id}`,
-                inputJsonSchema: null,
-                outputJsonSchema: null
+                inputJsonSchema: null
             };
         }
 
@@ -129,12 +89,13 @@ async function inspectAdapterFile(file) {
             return buildAdapterMeta({
                 id: file.id,
                 name: manifest.name || file.id,
-                inputJsonSchema: manifest.inputJsonSchema || null,
-                outputJsonSchema: manifest.outputJsonSchema || null
+                description: manifest.description || null,
+                homePageUrl: manifest.homePageUrl || null,
+                inputJsonSchema: manifest.inputJsonSchema || null
             }, false, `manifest.id 必须与文件名一致 (${file.id})`);
         }
 
-        const errors = registry.getManifestErrors(manifest, file.fileName);
+        const errors = registry.getManifestErrors(manifest);
         if (errors.length > 0) {
             return buildAdapterMeta(manifest, false, errors.join('; '));
         }
@@ -148,8 +109,7 @@ async function inspectAdapterFile(file) {
             error: err.message,
             name: file.id,
             endpoint: `/api/${file.id}`,
-            inputJsonSchema: null,
-            outputJsonSchema: null
+            inputJsonSchema: null
         };
     }
 }
@@ -355,12 +315,7 @@ export function createAdminRouter(context) {
             // GET/POST /admin/config/server
             if (pathname === '/config/server') {
                 if (method === 'GET') {
-                    const serverConfig = getServerConfig();
-                    const queueConfig = getQueueConfig();
-                    sendJson(res, 200, {
-                        ...serverConfig,
-                        queueBuffer: queueConfig.queueBuffer
-                    });
+                    sendJson(res, 200, getServerConfig());
                 } else if (method === 'POST') {
                     const body = await readBody(req);
 
@@ -376,9 +331,6 @@ export function createAdminRouter(context) {
 
                     // 分别保存 server 和 queue 配置
                     saveServerConfig(body);
-                    if (body.queueBuffer !== undefined) {
-                        saveQueueConfig(body);
-                    }
                     sendJson(res, 200, { success: true, message: '配置已保存，请重启服务生效' });
                 } else {
                     res.writeHead(405);
@@ -442,32 +394,6 @@ export function createAdminRouter(context) {
                 return;
             }
 
-            // GET/POST /admin/config/adapters
-            if (pathname === '/config/adapters') {
-                if (method === 'GET') {
-                    sendJson(res, 200, getAdaptersConfig());
-                } else if (method === 'POST') {
-                    const body = await readBody(req);
-
-                    // 校验配置
-                    const validation = validateAdaptersConfig(body);
-                    if (!validation.valid) {
-                        sendApiError(res, {
-                            code: ERROR_CODES.INVALID_REQUEST_BODY,
-                            message: `配置校验失败: ${validation.errors.join('; ')}`
-                        });
-                        return;
-                    }
-
-                    saveAdaptersConfig(body);
-                    sendJson(res, 200, { success: true, message: '配置已保存，请重启服务生效' });
-                } else {
-                    res.writeHead(405);
-                    res.end();
-                }
-                return;
-            }
-
             // GET/POST /admin/config/pool - 负载均衡和故障转移配置
             if (pathname === '/config/pool') {
                 if (method === 'GET') {
@@ -502,38 +428,88 @@ export function createAdminRouter(context) {
                 return;
             }
 
-            // GET /admin/adapters/:id/source - 获取脚本源码
+            // GET/PUT /admin/adapters/:id/source - 结构化 manifest 读写
             const adapterSourceMatch = pathname.match(/^\/adapters\/([^/]+)\/source$/);
-            if (method === 'GET' && adapterSourceMatch) {
+            if (adapterSourceMatch) {
                 const adapterId = normalizeAdapterId(decodeURIComponent(adapterSourceMatch[1]));
-                if (!await adapterSourceExists(adapterId)) {
-                    sendApiError(res, { code: ERROR_CODES.NOT_FOUND, message: '适配器不存在', status: 404 });
+                if (method === 'GET') {
+                    if (!await adapterSourceExists(adapterId)) {
+                        sendApiError(res, { code: ERROR_CODES.NOT_FOUND, message: '适配器不存在', status: 404 });
+                        return;
+                    }
+                    try {
+                        const filePath = getAdapterFilePath(adapterId);
+                        const structured = await parseSourceToStructured(filePath);
+                        sendJson(res, 200, { id: adapterId, manifest: structured });
+                    } catch (err) {
+                        sendApiError(res, { code: ERROR_CODES.INTERNAL_ERROR, message: `manifest 解析失败: ${err.message}` });
+                    }
                     return;
                 }
-                const source = await readAdapterSource(adapterId);
-                sendJson(res, 200, { id: adapterId, source });
-                return;
+                if (method === 'PUT') {
+                    let body;
+                    try { body = await readBody(req); } catch (e) {
+                        sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: e.message });
+                        return;
+                    }
+                    try {
+                        const { adapterId: generatedId, source } = buildSourceFromStructured({ ...body, id: adapterId });
+                        if (generatedId !== adapterId) {
+                            sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: 'manifest.id 与路径不一致' });
+                            return;
+                        }
+                        await writeAdapterSource(adapterId, source);
+                    } catch (err) {
+                        sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: err.message });
+                        return;
+                    }
+                    await registry.reload();
+                    const adapters = await listDynamicAdapters();
+                    const adapter = adapters.find(item => item.id === adapterId);
+                    const success = !!adapter?.valid;
+                    sendJson(res, 200, {
+                        success,
+                        message: success ? '脚本已保存并生效' : `脚本已保存，但当前无效: ${adapter?.error || '未知错误'}`,
+                        adapter
+                    });
+                    return;
+                }
             }
 
-            // PUT /admin/adapters/:id/source - 保存脚本源码
-            if (method === 'PUT' && adapterSourceMatch) {
-                const adapterId = normalizeAdapterId(decodeURIComponent(adapterSourceMatch[1]));
-                const body = await readBody(req);
-                if (typeof body.source !== 'string') {
-                    sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: '缺少 source 字段' });
+            // POST /admin/adapters - 新建（结构化 manifest）
+            if (method === 'POST' && pathname === '/adapters') {
+                let body;
+                try { body = await readBody(req); } catch (e) {
+                    sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: e.message });
                     return;
                 }
-
-                await writeAdapterSource(adapterId, body.source);
+                const requestedId = body?.id;
+                if (typeof requestedId !== 'string' || !requestedId.trim()) {
+                    sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: '缺少 id 字段' });
+                    return;
+                }
+                let adapterId;
+                try { adapterId = normalizeAdapterId(requestedId); } catch (e) {
+                    sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: e.message });
+                    return;
+                }
+                if (await adapterSourceExists(adapterId)) {
+                    sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: `适配器已存在: ${adapterId}` });
+                    return;
+                }
+                try {
+                    const { adapterId: generatedId, source } = buildSourceFromStructured({ ...body, id: adapterId });
+                    if (generatedId !== adapterId) {
+                        sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: 'manifest.id 与请求 id 不一致' });
+                        return;
+                    }
+                    await writeAdapterSource(adapterId, source);
+                } catch (err) {
+                    sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: err.message });
+                    return;
+                }
                 await registry.reload();
-                const adapters = await listDynamicAdapters();
-                const adapter = adapters.find(item => item.id === adapterId);
-                const success = !!adapter?.valid;
-                sendJson(res, 200, {
-                    success,
-                    message: success ? '脚本已保存并生效' : `脚本已保存，但当前无效: ${adapter?.error || '未知错误'}`,
-                    adapter
-                });
+                sendJson(res, 200, { success: true, message: '适配器已创建', id: adapterId });
                 return;
             }
 
@@ -548,61 +524,6 @@ export function createAdminRouter(context) {
                 await deleteAdapterSource(adapterId);
                 await registry.reload();
                 sendJson(res, 200, { success: true, message: '适配器已删除' });
-                return;
-            }
-
-            // POST /admin/debug/run - 直接执行临时调试脚本
-            if (method === 'POST' && pathname === '/debug/run') {
-                const body = await readBody(req);
-                const script = typeof body.script === 'string' ? body.script : body.source;
-                if (typeof script !== 'string' || !script.trim()) {
-                    sendApiError(res, { code: ERROR_CODES.INVALID_REQUEST_BODY, message: '缺少 script 字段' });
-                    return;
-                }
-
-                const workerName = body.workerName || null;
-                const input = body.input && typeof body.input === 'object' ? body.input : {};
-                const keepPageOpen = !!body.keepPageOpen;
-                const timeout = body.timeout || null;
-
-                let poolContext = queueManager?.getPoolContext?.();
-                if (!poolContext) {
-                    poolContext = await queueManager.initializePool();
-                }
-
-                const runId = buildRequestId();
-                await ensureDebugArtifactsDir(tempDir);
-                await cleanupDebugArtifacts(tempDir);
-                const artifactDir = path.join(getDebugArtifactsRoot(tempDir), runId);
-                const artifactBasePath = `/admin/debug/artifacts/${encodeURIComponent(runId)}`;
-
-                const result = await poolContext.poolManager.runDebugScript(
-                    workerName,
-                    script,
-                    input,
-                    { id: runId, debug: true },
-                    { keepPageOpen, timeout, artifactDir, artifactBasePath }
-                );
-                result.runId = runId;
-                sendJson(res, 200, result);
-                return;
-            }
-
-            const debugArtifactMatch = pathname.match(/^\/debug\/artifacts\/([^/]+)\/([^/]+)$/);
-            if (method === 'GET' && debugArtifactMatch) {
-                const runId = decodeURIComponent(debugArtifactMatch[1]);
-                const fileName = decodeURIComponent(debugArtifactMatch[2]);
-                const filePath = path.join(getDebugArtifactsRoot(tempDir), runId, fileName);
-                try {
-                    const content = await fs.readFile(filePath);
-                    res.writeHead(200, {
-                        'Content-Type': getArtifactContentType(fileName),
-                        'Cache-Control': 'no-cache'
-                    });
-                    res.end(content);
-                } catch {
-                    sendApiError(res, { code: ERROR_CODES.NOT_FOUND, message: '调试产物不存在', status: 404 });
-                }
                 return;
             }
 

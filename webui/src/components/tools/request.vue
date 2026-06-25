@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useSettingsStore } from '@/stores/settings';
 import { message, Modal } from 'ant-design-vue';
 import {
@@ -11,11 +11,9 @@ import {
     RedoOutlined,
     DownloadOutlined
 } from '@ant-design/icons-vue';
-import SchemaField from './SchemaField.vue';
 
 const settingsStore = useSettingsStore();
 
-const loading = ref(false);
 const records = ref([]);
 const total = ref(0);
 const page = ref(1);
@@ -30,7 +28,12 @@ const previewModalVisible = ref(false);
 const previewContent = ref('');
 const previewTitle = ref('预览');
 const selectedAdapterId = ref('');
-const formValue = ref({});
+
+// 新请求协议字段
+const inputText = ref('{}');
+const debugFlag = ref(false);
+const workerIdText = ref('');
+const overrideScriptText = ref('');
 const sending = ref(false);
 const latestResponse = ref(null);
 const latestError = ref('');
@@ -39,61 +42,59 @@ const autoRefreshEnabled = ref(true);
 let autoRefreshInterval = null;
 let searchTimeout = null;
 
-function deepClone(value) {
-    return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
-}
-
-function inferSchemaType(schema) {
-    if (schema?.type) return schema.type;
-    if (schema?.enum) return 'string';
-    if (schema?.properties) return 'object';
-    if (schema?.items) return 'array';
-    return 'string';
-}
-
-function isFileObjectSchema(schema) {
-    if (!schema || inferSchemaType(schema) !== 'object') return false;
-    const properties = schema.properties || {};
-    return 'fileName' in properties && 'mimeType' in properties && 'base64' in properties;
-}
-
-function isMultiFileSchema(schema) {
-    return schema?.['x-ui'] === 'files' || (inferSchemaType(schema) === 'array' && isFileObjectSchema(schema.items));
-}
-
-function buildDefaultValue(schema) {
-    if (!schema) return null;
-    if (schema.default !== undefined) return deepClone(schema.default);
-    if (schema.enum?.length) return schema.enum[0];
-
-    const schemaType = inferSchemaType(schema);
-    if (schema?.['x-ui'] === 'file' || isFileObjectSchema(schema)) return null;
-    if (isMultiFileSchema(schema)) return [];
-    if (schemaType === 'object') {
-        const result = {};
-        for (const [key, childSchema] of Object.entries(schema.properties || {})) {
-            if (childSchema.default !== undefined || (schema.required || []).includes(key)) {
-                result[key] = buildDefaultValue(childSchema);
-            }
+function tryParseInput() {
+    const raw = String(inputText.value || '').trim() || '{}';
+    try {
+        const obj = JSON.parse(raw);
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+            throw new Error('input 必须是 JSON 对象');
         }
-        return result;
+        return { ok: true, value: obj };
+    } catch (e) {
+        return { ok: false, error: e.message };
     }
-    if (schemaType === 'array') return [];
-    if (schemaType === 'boolean') return false;
-    if (schemaType === 'number' || schemaType === 'integer') return 0;
-    return '';
 }
 
 const adapters = computed(() => settingsStore.adaptersMeta.filter(item => item.valid !== false));
 const adapterOptions = computed(() => adapters.value.map(item => ({ label: item.name || item.id, value: item.id })));
 const selectedAdapter = computed(() => adapters.value.find(item => item.id === selectedAdapterId.value) || null);
 const adapterEndpoint = computed(() => selectedAdapter.value?.endpoint || (selectedAdapter.value ? `/api/${selectedAdapter.value.id}` : ''));
-const adapterInputSchema = computed(() => selectedAdapter.value?.inputJsonSchema || null);
-const adapterOutputSchema = computed(() => selectedAdapter.value?.outputJsonSchema || null);
 const curlBaseUrl = computed(() => {
     const configured = String(settingsStore.serverConfig?.publicApiBaseUrl || '').trim();
     return configured || window.location.origin;
 });
+
+const parsedInput = computed(() => tryParseInput());
+const inputJsonError = computed(() => parsedInput.value.ok ? '' : parsedInput.value.error);
+
+function buildRequestPayload() {
+    const parsed = tryParseInput();
+    if (!parsed.ok) {
+        throw new Error(`input JSON 解析失败: ${parsed.error}`);
+    }
+    const payload = { input: parsed.value };
+    if (debugFlag.value) payload.debug = true;
+    const workerId = String(workerIdText.value || '').trim();
+    if (workerId) payload.workerId = workerId;
+    const overrideScript = String(overrideScriptText.value || '');
+    if (overrideScript.trim()) payload.overrideScript = overrideScript;
+    return payload;
+}
+
+function buildCurlCommand() {
+    if (!selectedAdapter.value) return '';
+    let body;
+    try { body = buildRequestPayload(); }
+    catch { body = { input: {} }; }
+    const url = `${curlBaseUrl.value}${adapterEndpoint.value}`;
+    const json = JSON.stringify(body, null, 2);
+    const escapedJson = json.replace(/'/g, `'"'"'`);
+    return [
+        `curl -X POST "${url}" \\`,
+        '  -H "Content-Type: application/json" \\',
+        `  -d '${escapedJson}'`
+    ].filter(Boolean).join('\n');
+}
 
 const historyColumns = [
     { title: '状态', dataIndex: 'status', key: 'status', width: 80, align: 'center' },
@@ -102,17 +103,14 @@ const historyColumns = [
     { title: '响应', dataIndex: 'response_summary', key: 'response_summary', width: 320 },
     { title: '时间', dataIndex: 'created_at', key: 'created_at', width: 140 },
     { title: '耗时', dataIndex: 'duration_ms', key: 'duration_ms', width: 80, align: 'right' },
-    { title: '', key: 'action', width: 120, align: 'center', fixed: 'right' }
+    { title: '', key: 'action', width: 140, align: 'center', fixed: 'right' }
 ];
 
 function formatTime(timestamp) {
     if (!timestamp) return '-';
     return new Date(timestamp).toLocaleString('zh-CN', {
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit'
+        month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit'
     });
 }
 
@@ -133,14 +131,17 @@ function getStatusColor(status) {
     return 'processing';
 }
 
-function resetFormFromSchema() {
-    formValue.value = buildDefaultValue(adapterInputSchema.value || { type: 'object', properties: {} }) || {};
+function resetRequestForm() {
+    inputText.value = '{}';
+    debugFlag.value = false;
+    workerIdText.value = '';
+    overrideScriptText.value = '';
+    latestResponse.value = null;
+    latestError.value = '';
 }
 
 watch(selectedAdapterId, () => {
-    resetFormFromSchema();
-    latestResponse.value = null;
-    latestError.value = '';
+    resetRequestForm();
 });
 
 watch(searchText, () => {
@@ -155,31 +156,6 @@ watch([statusFilter, adapterFilter], () => {
     page.value = 1;
     fetchHistory();
 });
-
-function buildCurlCommandLegacy() {
-    if (!selectedAdapter.value) return '';
-    const tokenHeader = settingsStore.token
-        ? `  -H "Authorization: Bearer ${settingsStore.token}" \\\n`
-        : '';
-    return `curl -X POST ${curlBaseUrl.value}${adapterEndpoint.value} \\
-${tokenHeader}  -H "Content-Type: application/json" \\
-  -d '${JSON.stringify(formValue.value)}'`;
-}
-
-function buildCurlCommand() {
-    if (!selectedAdapter.value) return '';
-    return [
-        `curl -X POST ${curlBaseUrl.value}${adapterEndpoint.value} \\`,
-        '  -H "Content-Type: application/json" \\',
-        `  -d '${JSON.stringify(formValue.value)}'`
-    ].filter(Boolean).join('\n');
-}
-
-function formatBodyPreview(preview, truncated, size) {
-    if (!preview) return '-';
-    if (!truncated) return preview;
-    return `${preview}\n\n...（仅展示前 1024 个字符，完整内容请在详情中下载；原始长度 ${size} 个字符）`;
-}
 
 async function fetchHistoryDetailById(id) {
     const res = await fetch(`/admin/history/${id}`, { headers: settingsStore.getHeaders() });
@@ -198,7 +174,6 @@ async function fetchAdapters() {
 }
 
 async function fetchHistory() {
-    loading.value = true;
     try {
         const params = new URLSearchParams({
             page: String(page.value),
@@ -215,17 +190,13 @@ async function fetchHistory() {
         }
     } catch (e) {
         message.error(`获取历史失败: ${e.message}`);
-    } finally {
-        loading.value = false;
     }
 }
 
 function startAutoRefresh() {
     if (autoRefreshInterval) return;
     autoRefreshInterval = setInterval(() => {
-        if (autoRefreshEnabled.value) {
-            fetchHistory();
-        }
+        if (autoRefreshEnabled.value) fetchHistory();
     }, 3000);
 }
 
@@ -241,6 +212,9 @@ async function sendRequest() {
         message.warning('请先选择适配器');
         return;
     }
+    let payload;
+    try { payload = buildRequestPayload(); }
+    catch (e) { message.error(e.message); return; }
 
     sending.value = true;
     latestResponse.value = null;
@@ -249,18 +223,16 @@ async function sendRequest() {
         const res = await fetch(adapterEndpoint.value, {
             method: 'POST',
             headers: settingsStore.getHeaders(),
-            body: JSON.stringify(formValue.value)
+            body: JSON.stringify(payload)
         });
-
-        const payload = await res.json().catch(() => ({}));
+        const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            latestError.value = payload.error?.message || payload.message || `HTTP ${res.status}`;
+            latestError.value = data.error?.message || data.message || `HTTP ${res.status}`;
             message.error(latestError.value);
         } else {
-            latestResponse.value = payload;
+            latestResponse.value = data;
             message.success('请求成功');
         }
-
         await fetchHistory();
     } catch (e) {
         latestError.value = e.message;
@@ -314,7 +286,6 @@ async function resendRecord(record) {
         message.warning('该记录缺少可重发的请求体');
         return;
     }
-
     try {
         const detail = record.request_body ? record : await fetchHistoryDetailById(record.id);
         if (!detail.request_body) {
@@ -322,7 +293,17 @@ async function resendRecord(record) {
             return;
         }
         selectedAdapterId.value = detail.adapter_id;
-        formValue.value = deepClone(detail.request_body);
+        // 重发时尽量还原新协议的 input
+        const body = detail.request_body;
+        if (body && typeof body === 'object' && 'input' in body) {
+            inputText.value = JSON.stringify(body.input, null, 2);
+            debugFlag.value = !!body.debug;
+            workerIdText.value = body.workerId || '';
+            overrideScriptText.value = ''; // overrideScript 不会保存在历史中
+        } else {
+            // 旧协议：原样回填 input
+            inputText.value = JSON.stringify(body, null, 2);
+        }
     } catch (e) {
         message.error(`读取重发内容失败: ${e.message}`);
     }
@@ -337,7 +318,6 @@ async function downloadHistoryBody(record, kind) {
             const payload = await res.json().catch(() => ({}));
             throw new Error(payload.error?.message || payload.message || `下载失败: HTTP ${res.status}`);
         }
-
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
@@ -381,13 +361,15 @@ onUnmounted(() => {
 <template>
     <a-card title="适配器调用" :bordered="false" style="margin-bottom: 24px;">
         <a-row :gutter="16">
-            <a-col :xs="24" :lg="8">
+            <a-col :xs="24" :lg="7">
                 <div style="margin-bottom: 16px;">
                     <div class="label">适配器</div>
                     <a-select v-model:value="selectedAdapterId" style="width: 100%" :options="adapterOptions" placeholder="选择适配器" />
                 </div>
                 <div v-if="selectedAdapter" class="meta-box">
                     <div><strong>名称：</strong>{{ selectedAdapter.name }}</div>
+                    <div v-if="selectedAdapter.description"><strong>说明：</strong>{{ selectedAdapter.description }}</div>
+                    <div v-if="selectedAdapter.homePageUrl"><strong>主页：</strong><code>{{ selectedAdapter.homePageUrl }}</code></div>
                     <div><strong>接口：</strong><code>{{ adapterEndpoint }}</code></div>
                 </div>
                 <div style="margin-top: 16px;">
@@ -400,24 +382,56 @@ onUnmounted(() => {
                 </div>
             </a-col>
 
-            <a-col :xs="24" :lg="16">
+            <a-col :xs="24" :lg="17">
                 <a-alert
                     type="info"
                     show-icon
                     style="margin-bottom: 16px;"
-                    message="固定调用方式为 POST /api/{adapter_id}，表单完全由适配器的 inputJsonSchema 驱动。"
+                    message="请求体使用新协议：{ input, debug?, workerId?, overrideScript? }，仅 input 必填。响应统一为 envelope：{ ok, data/message, meta, trace? }。"
                 />
-                <template v-if="adapterInputSchema">
-                    <SchemaField :schema="adapterInputSchema" field-key="input" :model-value="formValue" @update:model-value="value => formValue = value" />
-                    <div style="display: flex; gap: 8px; justify-content: flex-end;">
-                        <a-button @click="resetFormFromSchema">重置</a-button>
-                        <a-button type="primary" :loading="sending" @click="sendRequest">
+                <a-empty v-if="!selectedAdapter" description="请选择有效适配器" />
+                <template v-else>
+                    <div class="label">input (JSON 对象)</div>
+                    <a-textarea
+                        v-model:value="inputText"
+                        :auto-size="{ minRows: 8, maxRows: 16 }"
+                        style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;"
+                    />
+                    <div v-if="inputJsonError" class="error-text" style="margin-top: 4px;">{{ inputJsonError }}</div>
+
+                    <a-collapse style="margin-top: 12px;">
+                        <a-collapse-panel key="advanced" header="高级参数">
+                            <a-row :gutter="12">
+                                <a-col :xs="24" :md="6">
+                                    <div class="label">debug</div>
+                                    <a-switch v-model:checked="debugFlag" :checked-children="'true'" :un-checked-children="'false'" />
+                                    <span style="margin-left: 8px; color: #8c8c8c; font-size: 12px;">返回 trace</span>
+                                </a-col>
+                                <a-col :xs="24" :md="9">
+                                    <div class="label">workerId（粘性绑定，必须 type === adapterId）</div>
+                                    <a-input v-model:value="workerIdText" placeholder="可选：指定 worker" />
+                                </a-col>
+                                <a-col :xs="24" :md="9">
+                                    <div class="label">overrideScript（仅本次覆盖 manifest.script）</div>
+                                    <a-textarea
+                                        v-model:value="overrideScriptText"
+                                        :auto-size="{ minRows: 4, maxRows: 12 }"
+                                        placeholder="可选：覆盖脚本"
+                                        style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;"
+                                    />
+                                </a-col>
+                            </a-row>
+                        </a-collapse-panel>
+                    </a-collapse>
+
+                    <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;">
+                        <a-button @click="resetRequestForm">重置</a-button>
+                        <a-button type="primary" :loading="sending" :disabled="!!inputJsonError" @click="sendRequest">
                             <template #icon><RocketOutlined /></template>
                             调用接口
                         </a-button>
                     </div>
                 </template>
-                <a-empty v-else description="请选择有效适配器" />
             </a-col>
         </a-row>
     </a-card>
@@ -426,94 +440,85 @@ onUnmounted(() => {
         <a-col :xs="24" :lg="12">
             <a-card title="最近响应" :bordered="false">
                 <template v-if="latestResponse">
+                    <div class="label">Envelope (ok / data / meta / trace?)</div>
                     <pre class="json-box">{{ JSON.stringify(latestResponse, null, 2) }}</pre>
                 </template>
                 <template v-else-if="latestError">
+                    <div class="label">错误</div>
                     <pre class="json-box error-box">{{ latestError }}</pre>
                 </template>
-                <a-empty v-else description="暂无调用结果" />
+                <a-empty v-else description="点击「调用接口」以查看响应" />
             </a-card>
         </a-col>
         <a-col :xs="24" :lg="12">
-            <a-card title="输出 Schema" :bordered="false">
-                <pre class="json-box">{{ JSON.stringify(adapterOutputSchema, null, 2) }}</pre>
+            <a-card title="使用说明" :bordered="false">
+                <ul style="padding-left: 20px; line-height: 1.8;">
+                    <li><code>input</code>：业务输入，会透传给 manifest.script 中的 <code>input</code> 变量。</li>
+                    <li><code>debug</code>：开启后响应中会包含 <code>trace.steps / captures / logs</code>。</li>
+                    <li><code>workerId</code>：粘性调试必须填写；该 worker 的 <code>type</code> 必须等于当前 adapterId。</li>
+                    <li><code>overrideScript</code>：仅本次执行覆盖 manifest.script，不修改元信息。</li>
+                    <li>所有文件产物（如截图）只返回 URL，不会泄露本地路径。</li>
+                </ul>
             </a-card>
         </a-col>
     </a-row>
 
-    <a-card title="请求历史" :bordered="false">
+    <a-card title="最近请求" :bordered="false">
         <template #extra>
             <a-space>
-                <a-switch v-model:checked="autoRefreshEnabled" checked-children="自动刷新" un-checked-children="手动刷新" />
-                <a-button @click="fetchHistory"><template #icon><ReloadOutlined /></template>刷新</a-button>
+                <a-input v-model:value="searchText" placeholder="搜索请求/响应" allow-clear style="width: 200px" />
+                <a-select v-model:value="statusFilter" style="width: 120px" :options="[
+                    { label: '全部', value: 'all' },
+                    { label: '成功', value: 'success' },
+                    { label: '失败', value: 'failed' },
+                    { label: '等待中', value: 'pending' }
+                ]" />
+                <a-input v-model:value="adapterFilter" placeholder="按适配器过滤" allow-clear style="width: 180px" />
+                <a-switch v-model:checked="autoRefreshEnabled" checked-children="自动" un-checked-children="手动" />
+                <a-button @click="fetchHistory" icon="reload" />
             </a-space>
         </template>
-
-        <div class="toolbar">
-            <a-select v-model:value="statusFilter" style="width: 140px" size="small">
-                <a-select-option value="all">全部状态</a-select-option>
-                <a-select-option value="success">成功</a-select-option>
-                <a-select-option value="failed">失败</a-select-option>
-                <a-select-option value="pending">处理中</a-select-option>
-            </a-select>
-            <a-select v-model:value="adapterFilter" style="width: 180px" size="small" allow-clear placeholder="全部适配器">
-                <a-select-option v-for="item in adapterOptions" :key="item.value" :value="item.value">{{ item.label }}</a-select-option>
-            </a-select>
-            <a-input-search v-model:value="searchText" style="max-width: 280px" size="small" allow-clear placeholder="搜索请求或响应摘要" />
-        </div>
 
         <a-table
             :columns="historyColumns"
             :data-source="records"
-            :loading="loading"
+            :pagination="{ current: page, pageSize: pageSize, total: total, showSizeChanger: true }"
             row-key="id"
-            size="small"
-            :pagination="{
-                current: page,
-                pageSize,
-                total,
-                showSizeChanger: true,
-                showQuickJumper: true,
-                showTotal: total => `共 ${total} 条`
-            }"
-            :scroll="{ x: 1100 }"
             @change="handleTableChange"
         >
             <template #bodyCell="{ column, record }">
                 <template v-if="column.key === 'status'">
                     <a-tag :color="getStatusColor(record.status)">{{ record.status }}</a-tag>
                 </template>
-                <template v-else-if="column.key === 'adapter_id'">
-                    <div>
-                        <div><code>{{ record.endpoint_path || `/api/${record.adapter_id}` }}</code></div>
-                        <div style="font-size: 12px; color: #8c8c8c;">{{ record.adapter_id || '-' }}</div>
+                <template v-else-if="column.key === 'request_summary' || column.key === 'response_summary'">
+                    <div
+                        class="clickable multiline-text"
+                        @click="previewText(
+                            column.title,
+                            column.key === 'request_summary'
+                                ? (record.request_body ? JSON.stringify(record.request_body, null, 2) : (record.request_summary || '-'))
+                                : (record.status === 'failed' ? record.error_message : (record.response_body ? JSON.stringify(record.response_body, null, 2) : record.response_summary))
+                        )"
+                    >
+                        {{ truncateText(
+                            column.key === 'request_summary'
+                                ? record.request_summary
+                                : (record.status === 'failed' ? record.error_message : record.response_summary),
+                            180
+                        ) }}
                     </div>
                 </template>
-                <template v-else-if="column.key === 'request_summary'">
-                    <div class="multiline-text clickable" @click="previewText('请求体预览', record.request_body_preview ? formatBodyPreview(record.request_body_preview, record.request_body_truncated, record.request_body_size) : record.request_summary)">
-                        {{ truncateText(record.request_summary, 160) }}
-                    </div>
-                </template>
-                <template v-else-if="column.key === 'response_summary'">
-                    <div class="multiline-text clickable" :class="{ 'error-text': record.status === 'failed' }" @click="previewText('响应预览', record.status === 'failed' ? record.error_message : (record.response_body_preview ? formatBodyPreview(record.response_body_preview, record.response_body_truncated, record.response_body_size) : record.response_summary))">
-                        {{ truncateText(record.status === 'failed' ? record.error_message : record.response_summary, 180) }}
-                    </div>
-                </template>
-                <template v-else-if="column.key === 'created_at'">
-                    {{ formatTime(record.created_at) }}
-                </template>
-                <template v-else-if="column.key === 'duration_ms'">
-                    {{ formatDuration(record.duration_ms) }}
-                </template>
+                <template v-else-if="column.key === 'created_at'">{{ formatTime(record.created_at) }}</template>
+                <template v-else-if="column.key === 'duration_ms'">{{ formatDuration(record.duration_ms) }}</template>
                 <template v-else-if="column.key === 'action'">
                     <a-space :size="0">
-                        <a-button type="link" size="small" @click="resendRecord(record)">
+                        <a-button type="link" size="small" @click="resendRecord(record)" title="复用参数重发">
                             <template #icon><RedoOutlined /></template>
                         </a-button>
-                        <a-button type="link" size="small" @click="viewDetail(record)">
+                        <a-button type="link" size="small" @click="viewDetail(record)" title="查看详情">
                             <template #icon><EyeOutlined /></template>
                         </a-button>
-                        <a-button type="link" size="small" danger @click="deleteRecord(record)">
+                        <a-button type="link" size="small" danger @click="deleteRecord(record)" title="删除">
                             <template #icon><DeleteOutlined /></template>
                         </a-button>
                     </a-space>
@@ -597,13 +602,6 @@ onUnmounted(() => {
     color: #ff4d4f;
     background: #fff2f0;
     border-color: #ffccc7;
-}
-
-.toolbar {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-bottom: 16px;
 }
 
 .multiline-text {

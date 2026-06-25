@@ -26,12 +26,12 @@
 
 ## 📝 Project Introduction
 
-**WebAI2API** is a tool that converts web-based AI services into general APIs based on **Camoufox (Playwright)**. It interacts with websites like LMArena and Gemini by simulating human operations, providing interfaces compatible with the **OpenAI format**, while supporting **multi-window concurrency** and **multi-account management** (browser instance data isolation).
+**WebAI2API** is a scriptable web-AI execution platform based on **Camoufox (Playwright)**. It interacts with websites such as ChatGPT and Gemini through real browser automation, and exposes a unified **`/api/{adapterId}` execution interface** while supporting **multi-window concurrency** and **multi-account management** (browser instance data isolation).
 
 ### ✨ Key Features
 
 - 🤖 **Human-like Interaction**: Simulates human typing and mouse trajectories, evading automation detection through feature camouflage.
-- 🔄 **API Compatibility**: Provides standard OpenAI format interfaces, supporting streaming responses and heartbeat persistence.
+- 🔄 **Unified Execution API**: Execute the default script or an override script through `POST /api/{adapterId}`.
 - 🚀 **Concurrency & Isolation**: Supports multi-window concurrent execution with independent proxy configurations, achieving browser-level data isolation for multiple accounts.
 - 🛡️ **Stable Protection**: Built-in task queue, load balancing, failover, error retry, and other essential functions.
 - 🎨 **Web Management**: Provides a visual management interface supporting real-time log viewing, VNC connection, adapter management, etc.
@@ -54,7 +54,7 @@
 | To be continued... | - | - | - | 
 
 > [!NOTE]
-> **Get full model list**: Use the `GET /v1/models` endpoint to view all available models and their details under the current configuration.
+> **Get available capabilities**: Use the WebUI “Adapters / Request API” pages to inspect currently available `adapterId` values and their metadata.
 > 
 > ✅ Supported; ❌ Not currently supported, but may be in the future; 🚫 Website does not support, future support depends on the website's status; 💧 Results contain watermarks that cannot be removed.
 
@@ -202,83 +202,40 @@ http://localhost:3000
 > [!TIP]
 > **Detailed Documentation**: Please visit the [WebAI2API Documentation Center](https://foxhui.github.io/WebAI2API/en/) for a more comprehensive configuration guide and interface description.
 
-### 1. OpenAI Compatible API
+### 1. Unified Execution API
 
 > [!WARNING]
-> **Concurrency Limits and Streaming Keep-alive Recommendations**
-> 
-> This project is implemented by simulating real browser operations, and processing time may vary. When the backlog of tasks exceeds the configured amount, non-streaming requests will be rejected directly.
-> 
-> **💡 Highly Recommended to enable Streaming Mode**: The server will send keep-alive heartbeat packets, allowing for infinite queuing to avoid timeouts.
+> **Concurrency and Queueing**
+>
+> Requests are first limited by a global entry queue, then by the target worker's local FIFO queue. When either queue is full, the request is rejected.
 
-#### Text Chat
-
-**Endpoint**: `POST /v1/chat/completions`
+**Endpoint**: `POST /api/{adapterId}`
 
 **Request Example**:
 ```bash
-curl http://localhost:3000/v1/chat/completions \
+curl http://localhost:3000/api/chatgpt \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
-    "model": "gemini-3-pro",
-    "messages": [
-      {"role": "user", "content": "Hello, please introduce yourself"}
-    ],
-    "stream": true
+    "input": {
+      "prompt": "Hello, please introduce yourself"
+    },
+    "debug": false
   }'
 ```
-
-#### Multimodal Requests (Text-to-Image / Image-to-Image)
-
-**Supported Image Formats**:
-- **Formats**: PNG, JPEG, GIF, WebP
-- **Quantity**: Max 10 images (specific limits vary by website)
-- **Data Format**: Must use Base64 Data URL format
-- **Auto Conversion**: The server automatically converts all images to JPG to ensure compatibility.
 
 #### Parameter Description
 
 | Parameter | Type | Required | Description |
 | :--- | :--- | :---: | :--- |
-| `model` | string | ✅ | Model name, available list can be retrieved via `/v1/models` |
-| `stream` | boolean | Rec. | Whether to enable streaming response, includes heartbeat keep-alive mechanism |
+| `input` | object | ✅ | Business input object, exposed to the script as `input` |
+| `debug` | boolean | Optional | When `true`, response includes `trace.steps / trace.captures / trace.logs` |
+| `workerId` | string | Optional | Force the request onto a specific worker (sticky debugging) |
+| `overrideScript` | string | Optional | Override the default manifest script for this request only |
 
 > [!NOTE]
-> **Regarding Streaming Keep-alive (Heartbeat)**
+> **About `workerId`**
 >
-> To prevent long connection timeouts, the system provides two keep-alive modes (configurable):
-> 1. **Comment Mode (Default/Recommended)**: Sends `:keepalive` comments, compliant with SSE standards, best compatibility.
-> 2. **Content Mode**: Sends data packets with empty content, only for special clients that must receive JSON data to reset timeouts.
-
-### 2. Get Model List
-
-**Endpoint**: `GET /v1/models`
-
-**Request Example**:
-```bash
-curl http://localhost:3000/v1/models \
-  -H "Authorization: Bearer YOUR_API_KEY"
-```
-
-### 3. Get Cookies
-
-**Description**: Utilize the project's automatic renewal feature to get the latest Cookies for use with other tools.
-
-**Endpoint**: `GET /v1/cookies`
-
-**Parameters**:
-- `name` (Optional): Browser instance name, defaults to `default`.
-- `domain` (Optional): Filter Cookies for a specific domain.
-
-**Request Example**:
-```bash
-# Get cookies for a specific instance and domain
-curl "http://localhost:3000/v1/cookies?name=browser_default&domain=lmarena.ai" \
-  -H "Authorization: Bearer YOUR_API_KEY"
-```
-
----
+> If `workerId` is omitted, the system selects a worker that supports the given `adapterId` using the configured scheduling strategy. If `workerId` is provided, the request is pinned to that worker and waits in its local FIFO queue when busy.
 
 ## 📊 Hardware Configuration Reference
 

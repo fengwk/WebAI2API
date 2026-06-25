@@ -26,12 +26,12 @@
 
 ## 📝 项目简介
 
-**WebAI2API** 是一个基于 **Camoufox (Playwright)** 的网页版 AI 服务转通用 API 的工具。通过模拟人类操作与 LMArena、Gemini 等网站交互, 提供兼容 **OpenAI 格式** 的接口服务, 同时支持 **多窗口并发** 与 **多账号管理**(浏览器实例数据隔离)。
+**WebAI2API** 是一个基于 **Camoufox (Playwright)** 的网页版 AI 服务脚本化执行平台。它通过真实浏览器自动化与 ChatGPT、Gemini 等网站交互，对外提供统一的 **`/api/{adapterId}` 执行接口**，同时支持 **多窗口并发** 与 **多账号管理**（浏览器实例数据隔离）。
 
 ### ✨ 主要特性
 
 - 🤖 **拟人交互**: 模拟人类打字与鼠标轨迹, 通过特征伪装规避自动化检测
-- 🔄 **接口兼容**: 提供标准 OpenAI 格式接口, 支持流式响应与心跳保活
+- 🔄 **统一执行接口**: 通过 `POST /api/{adapterId}` 执行默认脚本或覆盖脚本
 - 🚀 **并发隔离**: 支持多窗口并发执行, 可配置独立代理,实现多账号浏览器实例级数据隔离
 - 🛡️ **稳定防护**: 内置任务队列、负载均衡、故障转移、错误重试等基础功能
 - 🎨 **网页管理**: 提供可视化管理界面, 支持实时日志查看、VNC 连接、适配器管理等
@@ -54,7 +54,7 @@
 | 待续... | - | - | - | 
 
 > [!NOTE]
-> **获取完整模型列表**: 通过 `GET /v1/models` 接口查看当前配置下所有可用模型及其详细信息。
+> **获取可用能力列表**: 通过 WebUI 的“适配器脚本 / 请求 API”页面查看当前可用的 `adapterId` 及其元信息。
 > 
 > ✅目前支持；❌目前不支持，但未来可能会支持；🚫网站不支持, 未来是否在支持看网站具体情况；💧结果带水印且无法去除；
 
@@ -220,83 +220,42 @@ http://localhost:3000
 > [!TIP]
 > **详细文档**: 请访问 [WebAI2API 文档中心](https://foxhui.github.io/WebAI2API/) 获取更全面的配置指南与接口说明。
 
-### 1. OpenAI 兼容接口
+### 1. 统一执行接口
 
 > [!WARNING]
-> **并发限制与流式保活建议**
-> 
-> 本项目通过模拟真实浏览器操作实现, 处理过程根据实际情况时间可能有所变化, 当积压的任务超过设置的数量时会直接拒绝非流式模式的请求。
-> 
-> **💡 强烈建议开启流式模式**: 服务器将发送保活心跳包, 可无限排队避免超时。
+> **并发与排队说明**
+>
+> 本项目通过真实浏览器自动化执行脚本，请求会先经过全局入口队列，再进入目标 worker 的本地 FIFO 队列。
+> 当全局入口或目标 worker 队列已满时，请求会直接被拒绝。
 
-#### 文本对话
-
-**端点**: `POST /v1/chat/completions`
+**端点**: `POST /api/{adapterId}`
 
 **请求示例**:
 ```bash
-curl http://localhost:3000/v1/chat/completions \
+curl http://localhost:3000/api/chatgpt \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
-    "model": "gemini-3-pro",
-    "messages": [
-      {"role": "user", "content": "你好,请介绍一下你自己"}
-    ],
-    "stream": true
+    "input": {
+      "prompt": "你好,请介绍一下你自己"
+    },
+    "debug": false
   }'
 ```
-
-#### 多模态请求(文生图/图生图)
-
-**支持的图片格式**:
-- **格式**: PNG, JPEG, GIF, WebP
-- **数量**: 最大 10 张(具体限制因网站而异)
-- **数据格式**: 必须使用 Base64 Data URL 格式
-- **自动转换**: 服务器会自动将所有图片转换为 JPG 格式以保证兼容性
 
 #### 参数说明
 
 | 参数 | 类型 | 必填 | 说明 |
 | :--- | :--- | :---: | :--- |
-| `model` | string | ✅ | 模型名称, 可通过 `/v1/models` 获取可用列表 |
-| `stream` | boolean | 推荐 | 是否开启流式响应, 包含心跳保活机制 |
+| `input` | object | ✅ | 业务输入对象，会透传给脚本中的 `input` |
+| `debug` | boolean | 可选 | 为 `true` 时返回 `trace.steps / trace.captures / trace.logs` |
+| `workerId` | string | 可选 | 指定请求必须落到某个 worker（用于 sticky 调试） |
+| `overrideScript` | string | 可选 | 本次执行覆盖默认脚本内容，不修改已保存脚本 |
 
 > [!NOTE]
-> **关于流式保活 (Heartbeat)**
+> **关于 `workerId`**
 >
-> 为防止长连接超时, 系统提供两种保活模式 (可在配置中切换):
-> 1. **Comment 模式 (默认/推荐)**: 发送 `:keepalive` 注释, 符合 SSE 标准,兼容性最好
-> 2. **Content 模式**: 发送空内容的 data 包, 仅用于必须收到 JSON 数据才重置超时的特殊客户端
-
-### 2. 获取模型列表
-
-**端点**: `GET /v1/models`
-
-**请求示例**:
-```bash
-curl http://localhost:3000/v1/models \
-  -H "Authorization: Bearer YOUR_API_KEY"
-```
-
-### 3. 获取 Cookies
-
-**功能说明**: 利用本项目的自动续登功能获取最新 Cookie 供其他工具使用。
-
-**端点**: `GET /v1/cookies`
-
-**参数**:
-- `name` (可选): 浏览器实例名称,默认为 `default`
-- `domain` (可选): 过滤指定域名的 Cookie
-
-**请求示例**:
-```bash
-# 获取指定实例和域名的 Cookie
-curl "http://localhost:3000/v1/cookies?name=browser_default&domain=lmarena.ai" \
-  -H "Authorization: Bearer YOUR_API_KEY"
-```
-
----
+> 如果不传 `workerId`，系统会从支持当前 `adapterId` 的 worker 中按策略选择一个；
+> 如果传入 `workerId`，请求会固定落到该 worker，若其 busy 则进入该 worker 的本地 FIFO 队列等待。
 
 ## 📊 设备配置参考
 

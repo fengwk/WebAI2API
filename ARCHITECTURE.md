@@ -9,7 +9,7 @@ WebAI2API 的本质不是直接调用官方 API，而是：
 1. 使用真实浏览器 / 虚拟浏览器访问目标网站
 2. 通过 Playwright + Camoufox 模拟人工操作
 3. 从网页交互或站点接口响应中提取结果
-4. 对外暴露统一的 OpenAI 兼容 API
+4. 对外暴露统一的 `/api/{adapterId}` 执行接口
 
 适用场景：
 
@@ -25,7 +25,7 @@ WebAI2API 的本质不是直接调用官方 API，而是：
 
 ```text
 外部客户端
-  -> HTTP Server (/v1, /admin, WebUI)
+  -> HTTP Server (/api, /admin, WebUI)
     -> Queue / PoolManager
       -> Worker
         -> Adapter
@@ -35,7 +35,7 @@ WebAI2API 的本质不是直接调用官方 API，而是：
 
 ### 2.1 接口层
 
-- `/v1/*`：OpenAI 兼容接口
+- `/api/*`：统一执行接口
 - `/admin/*`：管理接口
 - `/`：WebUI 静态页面
 - `/admin/vnc`：VNC 的 WebSocket 代理
@@ -43,7 +43,6 @@ WebAI2API 的本质不是直接调用官方 API，而是：
 关键文件：
 
 - `src/server/api/index.js`
-- `src/server/api/openai/routes.js`
 - `src/server/api/admin/routes.js`
 - `src/server/api/admin/vncProxy.js`
 
@@ -65,10 +64,10 @@ WebAI2API 的本质不是直接调用官方 API，而是：
 
 Worker 是“可调度的执行单元”，负责：
 
-- 绑定一个 `type`（即适配器类型）
+- 绑定一个 `type`（即 adapterId）
 - 初始化浏览器或复用浏览器
-- 打开目标页面
-- 执行具体生成任务
+- 维护 resident page
+- 执行具体脚本任务
 
 关键文件：
 
@@ -80,27 +79,19 @@ Adapter 是整个项目最关键的扩展点。
 
 你可以把 Adapter 理解成：
 
-> 针对某个网站 / 某种能力封装的一套网页自动化插件。
+> 针对某个网站 / 某种能力封装的一段脚本化网页自动化能力。
 
-Adapter 通常负责：
+Adapter 当前负责：
 
-- 声明自己支持哪些模型
-- 定义目标 URL
-- 定义可选配置项
-- 执行页面自动化操作
-- 提取文本 / 图片 / 视频结果
-- 将站点结果转换成统一返回格式
+- 声明唯一 `id`
+- 提供 `name / description / homePageUrl / inputJsonSchema`
+- 提供 `script` 字符串
+- 在 worker resident page 上执行页面自动化操作
+- 返回可 JSON 序列化的结果
 
 关键目录：
 
-- `src/backend/adapter/`
-
-典型实现：
-
-- `src/backend/adapter/chatgpt.js`
-- `src/backend/adapter/chatgpt_text.js`
-- `src/backend/adapter/gemini.js`
-- `src/backend/adapter/gemini_text.js`
+- `data/adapters/*.js`
 
 ### 2.5 浏览器运行时
 
@@ -162,29 +153,26 @@ Worker 是一个可调度单元，代表：
 
 ## 3.3 Adapter
 
-Adapter 是“站点能力插件”。
+Adapter 是“站点能力脚本”。
 
 例如：
 
-- `chatgpt`：ChatGPT 图片生成
-- `chatgpt_text`：ChatGPT 文本生成
-- `gemini`：Gemini 图片 / 视频生成
-- `gemini_text`：Gemini 文本生成
+- `chatgpt`：ChatGPT 页面能力
+- `gemini`：Gemini 页面能力
 
 ---
 
 ## 4. 请求执行链路
 
-以一次 `/v1/chat/completions` 或 `/v1/images/generations` 为例：
+以一次 `POST /api/{adapterId}` 为例：
 
-1. 客户端调用 `/v1/*`
-2. 服务端完成 Bearer Token 鉴权
-3. 路由层解析模型
-4. Queue / PoolManager 选择合适的 Worker
-5. Worker 根据 `type` 找到对应 Adapter
-6. Adapter 驱动浏览器执行页面操作
-7. Adapter 从页面 / 网络响应提取结果
-8. 服务端将结果包装为 OpenAI 兼容格式返回
+1. 客户端调用 `/api/{adapterId}`
+2. 服务端解析请求体（`input / debug / workerId / overrideScript`）
+3. 请求进入全局入口队列
+4. Queue / PoolManager 选择或校验目标 Worker
+5. Worker 在 resident page 上执行 manifest.script 或 overrideScript
+6. 脚本通过 `api.capture / api.saveFile / api.step / api.log` 收集 trace 与产物
+7. Queue 将结果包装为统一 envelope（`ok / data|message / meta / trace?`）返回
 
 ---
 
@@ -192,12 +180,10 @@ Adapter 是“站点能力插件”。
 
 ## 5.1 单账号
 
-如果只有一套 Gemini / ChatGPT 登录态，可以把多个 Worker 放进同一个 Instance，例如：
+如果只有一套 Gemini / ChatGPT 登录态，可以把多个 worker 放进同一个 instance，例如：
 
 - `gemini`
-- `gemini_text`
 - `chatgpt`
-- `chatgpt_text`
 
 ## 5.2 多账号
 
@@ -237,7 +223,7 @@ WebUI 中的“虚拟显示器”并不是浏览器直连 `5900`，而是：
 
 放置位置：
 
-- `src/backend/adapter/my_site.js`
+- `data/adapters/my_site.js`
 
 注册表会自动扫描该目录，因此一般不需要手动登记。
 
@@ -246,33 +232,35 @@ WebUI 中的“虚拟显示器”并不是浏览器直连 `5900`，而是：
 `registry.js` 会校验以下核心字段：
 
 - `id`
-- `generate`
-- `models`
+- `name`
+- `description`（可选）
+- `homePageUrl`（可选）
+- `inputJsonSchema`（可选）
+- `script`
 
 推荐最小模板：
 
 ```js
 export const manifest = {
-  id: 'my_site',
-  name: 'My Site',
-  providers: [
-    {
-      type: 'openai-images-generations',
-      models: ['my-site-image'],
-      async execute(ctx, input) {
-        const { page, api } = ctx;
-        await page.goto('https://example.com/app', { waitUntil: 'domcontentloaded' });
-        api.log('info', '开始执行', { model: input.model });
-        return {
-          success: false,
-          error: {
-            message: 'not implemented',
-            retryable: false
-          }
-        };
-      }
-    }
-  ],
+  id: 'my_site_image',
+  name: 'My Site 图片生成',
+  description: '在 My Site 页面执行脚本',
+  homePageUrl: 'https://example.com/app',
+  inputJsonSchema: {
+    type: 'object',
+    properties: {
+      prompt: { type: 'string', title: '提示词' }
+    },
+    required: ['prompt']
+  },
+  script: `
+    await api.goto('https://example.com/app');
+    api.log('info', '开始执行', { prompt: input.prompt });
+    return {
+      url: page.url(),
+      title: await page.title()
+    };
+  `
 };
 ```
 
@@ -287,7 +275,7 @@ export const manifest = {
 5. 输入 prompt
 6. 点击发送
 7. 等待站点请求返回 / 下载链接出现 / DOM 结果出现
-8. 提取文本、图片、视频并转换成统一返回格式
+8. 提取文本、图片、视频并返回可 JSON 序列化的数据
 
 ## 7.4 推荐复用的公共能力
 
@@ -306,13 +294,13 @@ export const manifest = {
 
 ## 7.5 页面导航与状态收敛
 
-当前协议不再提供 `getTargetUrl` / `navigationHandlers`。
+当前协议不再提供 `getTargetUrl` / `navigationHandlers` / `providers[]` / `execute()`。
 
 原因：
 
 - 页面导航属于脚本实现细节
-- 一个 adapter 内可能包含多个 provider entry，不同 entry 未必去同一个 URL
-- 由 `execute()` 自己完成 `goto + 弹窗处理 + 页面收敛` 更直接
+- 当前一条 adapter 只对应一个能力脚本
+- 由 `script` 自己完成 `goto + 弹窗处理 + 页面收敛` 更直接
 
 ## 7.6 什么时候需要 `configSchema`
 
@@ -410,7 +398,7 @@ export const manifest = {
 
 WebAI2API 可以理解为：
 
-> 一个“面向网页 AI 服务的自动化适配框架 + OpenAI 兼容 API 外壳 + 多浏览器实例调度系统”。
+> 一个“面向网页 AI 服务的脚本化执行框架 + 多浏览器实例调度系统”。
 
 扩展新页面时，核心工作通常就是：
 

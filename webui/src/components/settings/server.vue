@@ -8,7 +8,6 @@ const settingsStore = useSettingsStore();
 const formData = reactive({
     port: 3000,
     logLevel: 'info',
-    queueBuffer: 2,
     publicFileBaseUrl: '',
     publicApiBaseUrl: ''
 });
@@ -94,31 +93,6 @@ const handleSave = async () => {
             </div>
         </a-card>
 
-        <!-- 队列设置 -->
-        <a-card title="队列设置" :bordered="false" style="width: 100%; margin-top: 10px;">
-            <a-row :gutter="[16, 16]">
-                <!-- 队列缓冲区大小 -->
-                <a-col :xs="24" :md="12">
-                    <div style="margin-bottom: 8px;">
-                        <div style="font-weight: 600; margin-bottom: 4px;">队列缓冲区大小</div>
-                        <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
-                            非流式请求的额外排队数（设为 0 则不限制非流式请求数量）<br>
-                            实际队列上限 = Workers数量 + 缓冲区大小
-                        </div>
-                        <a-input-number v-model:value="formData.queueBuffer" :min="0" :max="100" placeholder="默认为 2"
-                            style="width: 100%" />
-                    </div>
-                </a-col>
-
-            </a-row>
-
-            <!-- 保存按钮（右下角） -->
-            <div style="display: flex; justify-content: flex-end; margin-top: 24px;">
-                <a-button type="primary" @click="handleSave">
-                    保存设置
-                </a-button>
-            </div>
-        </a-card>
     </a-layout>
 </template>
 

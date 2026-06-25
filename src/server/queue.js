@@ -1,20 +1,35 @@
 /**
  * @fileoverview 任务队列管理模块
- * @description 负责请求队列、并发控制和动态适配器任务执行。
+ * @description 负责请求队列、并发控制、调度到 Pool，并将执行结果按新协议 envelope 写出。
+ *
+ * 入队任务结构（来自 /api/{adapterId} 路由）：
+ *   {
+ *     res, id, adapterId, adapter,
+ *     input, debug, workerId, overrideScript,
+ *     endpointPath, requestSummary, requestBody
+ *   }
+ *
+ * 出队 envelope：
+ *   - 成功: { ok: true,  data,    meta, trace? }
+ *   - 失败: { ok: false, message, meta, trace? }
  */
 
 import path from 'path';
 import { logger } from '../utils/logger.js';
-import { sendJson, sendApiError } from './respond.js';
+import { sendApiError, sendJson } from './respond.js';
 import { ERROR_CODES } from './errors.js';
 import { incrementSuccess, incrementFailed } from '../utils/stats.js';
 import { createRecord, updateRecord } from '../utils/history.js';
-import { validateJsonSchema } from '../utils/jsonSchema.js';
 import { summarizeResponseBody } from './api/adapter/routes.js';
 
 export function createQueueManager(queueConfig, callbacks) {
-    const { maxConcurrent, queueBuffer } = queueConfig;
-    const { initBrowser, executeTask, config, getCookies } = callbacks;
+    const {
+        maxConcurrent,
+        queueBuffer,
+        workerMaxPending = 10,
+        workerWaitTimeout = 300000
+    } = queueConfig;
+    const { initBrowser, executeTask, config } = callbacks;
     const effectiveQueueSize = queueBuffer === 0 ? Infinity : (maxConcurrent + queueBuffer);
 
     const queue = [];
@@ -27,97 +42,153 @@ export function createQueueManager(queueConfig, callbacks) {
         return configured ? configured.replace(/\/$/, '') : '';
     }
 
-    async function processTask(task) {
-        const { res, adapterId, adapter, input, id, endpointPath, requestSummary, requestBody } = task;
-        const startTime = Date.now();
+    function buildEnvelope({ ok, data, message, meta, trace }) {
+        const payload = { ok, meta };
+        if (ok) {
+            payload.data = data ?? null;
+        } else {
+            payload.message = message || '执行失败';
+        }
+        if (trace !== undefined && trace !== null) {
+            payload.trace = trace;
+        }
+        return payload;
+    }
 
-        logger.info('服务器', '[队列] 开始处理任务', { id, remaining: queue.length });
+    function buildMeta(task, { workerId, instanceId, queuedMs, durationMs, page }) {
+        return {
+            requestId: task.id,
+            adapterId: task.adapterId,
+            workerId: workerId || null,
+            instanceId: instanceId || null,
+            queuedMs: Math.max(0, queuedMs || 0),
+            durationMs: Math.max(0, durationMs || 0),
+            page: page || { url: '', title: '' }
+        };
+    }
+
+    async function processTask(task) {
+        const { res, id: requestId, debug, workerId, overrideScript } = task;
+        const startTime = Date.now();
+        const queuedMs = startTime - (task.enqueuedAt || startTime);
+
+        logger.info('服务器', '[队列] 开始处理任务', {
+            id: requestId,
+            adapterId: task.adapterId,
+            workerId: workerId || null,
+            debug: !!debug,
+            override: !!overrideScript,
+            remaining: queue.length
+        });
 
         try {
             createRecord({
-                id,
-                adapterId,
-                endpointPath,
-                requestSummary,
-                requestBody,
+                id: requestId,
+                adapterId: task.adapterId,
+                endpointPath: task.endpointPath,
+                requestSummary: task.requestSummary,
+                requestBody: task.requestBody,
                 status: 'pending'
             });
         } catch (e) {
             logger.debug('服务器', `创建历史记录失败: ${e.message}`);
         }
 
+        const publicBaseUrl = buildPublicBaseUrl();
+        const publicResponsePath = `/files/responses/${encodeURIComponent(requestId)}`;
+        const fileOutput = {
+            rootDir: path.join(process.cwd(), 'data', 'files', 'responses', requestId),
+            urlBasePath: publicBaseUrl ? `${publicBaseUrl}${publicResponsePath}` : publicResponsePath
+        };
+
+        let result;
         try {
             if (!poolContext) {
                 poolContext = await initBrowser(config);
             }
-
-            const publicBaseUrl = buildPublicBaseUrl();
-            const publicResponsePath = `/files/responses/${encodeURIComponent(id)}`;
-            const fileOutput = {
-                rootDir: path.join(process.cwd(), 'data', 'files', 'responses', id),
-                urlBasePath: publicBaseUrl ? `${publicBaseUrl}${publicResponsePath}` : publicResponsePath
+            result = await executeTask(poolContext, {
+                adapterId: task.adapterId,
+                input: task.input,
+                fileOutput,
+                debug: !!debug,
+                workerId: workerId || null,
+                overrideScript: overrideScript || null,
+                requestId
+            }, { id: requestId });
+        } catch (err) {
+            result = {
+                success: false,
+                error: { message: err.message || '执行异常', retryable: true }
             };
+        }
 
-            const result = await executeTask(poolContext, {
-                adapterId,
-                input,
-                fileOutput
-            }, { id });
+        const durationMs = Date.now() - startTime;
+        const meta = buildMeta(task, {
+            workerId: result.workerId,
+            instanceId: result.instanceId,
+            queuedMs,
+            durationMs,
+            page: result.page
+        });
 
-            if (!result.success) {
-                await incrementFailed();
-                updateRecord(id, {
+        // debug 时附带 trace；否则丢弃避免响应体过大
+        const trace = debug ? (result.trace || null) : null;
+
+        if (!result.success) {
+            await incrementFailed();
+            try {
+                updateRecord(requestId, {
                     status: 'failed',
                     errorMessage: result.error?.message || '执行失败',
-                    durationMs: Date.now() - startTime
+                    durationMs
                 });
-                sendApiError(res, {
-                    code: ERROR_CODES.GENERATION_FAILED,
-                    message: result.error?.message || '执行失败',
-                    status: result.error?.retryable ? 503 : 400
-                });
-                return;
+            } catch (e) {
+                logger.debug('服务器', `更新历史记录失败: ${e.message}`);
             }
 
-            const outputErrors = validateJsonSchema(adapter.outputJsonSchema, result.data, '$');
-            if (outputErrors.length > 0) {
-                await incrementFailed();
-                updateRecord(id, {
-                    status: 'failed',
-                    errorMessage: `输出校验失败: ${outputErrors.join('; ')}`,
-                    durationMs: Date.now() - startTime
-                });
-                sendApiError(res, {
-                    code: ERROR_CODES.INTERNAL_ERROR,
-                    message: `输出校验失败: ${outputErrors.join('; ')}`,
-                    status: 500
-                });
-                return;
-            }
+            if (res.writableEnded) return;
 
-            await incrementSuccess();
-            updateRecord(id, {
+            // 失败也按新协议 envelope 返回：{ ok:false, message, meta, trace? }
+            const errCode = result.error?.code;
+            const errMessage = result.error?.message || '执行失败';
+            let httpStatus = 502;
+            if (errCode === 'WORKER_BUSY') httpStatus = 429;
+            else if (errCode === 'WORKER_TIMEOUT') httpStatus = 504;
+            else if (result.error?.retryable === false) httpStatus = 400;
+
+            if (res.writeHead) res.writeHead(httpStatus, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(buildEnvelope({
+                ok: false,
+                message: errMessage,
+                meta,
+                trace
+            })));
+            return;
+        }
+
+        // 成功：直接写出新 envelope
+        await incrementSuccess();
+        try {
+            updateRecord(requestId, {
                 status: 'success',
                 responseSummary: summarizeResponseBody(result.data),
                 responseBody: result.data,
-                durationMs: Date.now() - startTime
+                durationMs
             });
-
-            logger.info('服务器', '结果已准备就绪', { id, adapterId });
-            sendJson(res, 200, result.data);
-        } catch (err) {
-            await incrementFailed();
-            updateRecord(id, {
-                status: 'failed',
-                errorMessage: err.message,
-                durationMs: Date.now() - startTime
-            });
-            logger.error('服务器', '任务处理失败', { id, error: err.message });
-            sendApiError(res, {
-                code: ERROR_CODES.INTERNAL_ERROR,
-                message: err.message
-            });
+        } catch (e) {
+            logger.debug('服务器', `更新历史记录失败: ${e.message}`);
         }
+
+        logger.info('服务器', '结果已准备就绪', { id: requestId, adapterId: task.adapterId, durationMs });
+        if (res.writableEnded) return;
+
+        const envelope = buildEnvelope({
+            ok: true,
+            data: result.data ?? null,
+            meta,
+            trace
+        });
+        sendJson(res, 200, envelope);
     }
 
     async function processQueue() {
@@ -135,19 +206,29 @@ export function createQueueManager(queueConfig, callbacks) {
             const idx = processingTasks.indexOf(task);
             if (idx !== -1) processingTasks.splice(idx, 1);
             processingCount--;
-            processQueue();
+        }
+
+        if (queue.length > 0 && processingCount < maxConcurrent) {
+            setImmediate(processQueue);
         }
     }
 
     function addTask(task) {
+        if (!task || typeof task !== 'object') {
+            throw new Error('addTask: 无效的 task');
+        }
+        if (!task.res) {
+            throw new Error('addTask: 缺少 res');
+        }
+        task.enqueuedAt = Date.now();
         queue.push(task);
         processQueue();
     }
 
     function getStatus() {
         return {
-            queueLength: queue.length,
             processing: processingCount,
+            queueLength: queue.length,
             total: processingCount + queue.length
         };
     }
@@ -157,12 +238,16 @@ export function createQueueManager(queueConfig, callbacks) {
             processing: processingTasks.map(task => ({
                 id: task.id,
                 adapterId: task.adapterId,
-                endpointPath: task.endpointPath
+                endpointPath: task.endpointPath,
+                workerId: task.workerId || null,
+                debug: !!task.debug,
+                override: !!task.overrideScript
             })),
             waiting: queue.map(task => ({
                 id: task.id,
                 adapterId: task.adapterId,
-                endpointPath: task.endpointPath
+                endpointPath: task.endpointPath,
+                workerId: task.workerId || null
             }))
         };
     }
@@ -180,13 +265,6 @@ export function createQueueManager(queueConfig, callbacks) {
         return poolContext;
     }
 
-    async function getWorkerCookies(workerName, domain) {
-        if (!getCookies) {
-            throw new Error('getCookies 回调未注册');
-        }
-        return await getCookies(workerName, domain);
-    }
-
     return {
         addTask,
         getStatus,
@@ -194,7 +272,8 @@ export function createQueueManager(queueConfig, callbacks) {
         canAcceptNonStreaming,
         initializePool,
         getPoolContext,
-        getWorkerCookies,
-        maxQueueSize: effectiveQueueSize
+        maxQueueSize: effectiveQueueSize,
+        workerMaxPending,
+        workerWaitTimeout
     };
 }

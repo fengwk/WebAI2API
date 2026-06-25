@@ -9,47 +9,34 @@ const loadingList = ref(false);
 const loadingSource = ref(false);
 const saving = ref(false);
 const selectedAdapterId = ref('');
-const sourceCode = ref('');
 const createVisible = ref(false);
 const newAdapterId = ref('');
+
+// 表单字段（创建时为可输入 id；编辑时 id 锁定为只读）
+const form = ref({
+    id: '',
+    name: '',
+    description: '',
+    homePageUrl: '',
+    inputJsonSchemaText: '{\n  "type": "object",\n  "properties": {}\n}',
+    script: ''
+});
 
 const adapters = computed(() => settingsStore.adaptersMeta);
 const selectedAdapter = computed(() => adapters.value.find(item => item.id === selectedAdapterId.value) || null);
 
-function buildTemplate(adapterId) {
-    return `export const manifest = {
-  id: '${adapterId}',
-  name: '${adapterId}',
-  inputJsonSchema: {
-    type: 'object',
-    required: ['prompt'],
-    properties: {
-      prompt: {
-        type: 'string',
-        title: 'Prompt',
-        description: '输入提示词',
-        'x-ui': 'textarea'
-      }
-    }
-  },
-  outputJsonSchema: {
-    type: 'object',
-    required: ['message'],
-    properties: {
-      message: {
-        type: 'string',
-        title: 'Message'
-      }
-    }
-  },
-  async execute(ctx, input) {
-    const { page, api } = ctx;
-    await page.goto('https://example.com', { waitUntil: 'domcontentloaded' });
-    api.log('info', '开始执行适配器', { promptLength: String(input.prompt || '').length });
-    return { message: '请编辑脚本后再调用 /api/${adapterId}' };
-  }
-};
-`;
+function blankTemplate(id) {
+    return {
+        id,
+        name: id,
+        description: '',
+        homePageUrl: '',
+        inputJsonSchemaText: '{\n  "type": "object",\n  "properties": {}\n}',
+        script: [
+            'await page.goto(\'https://example.com\', { waitUntil: \'domcontentloaded\' });',
+            'return { url: page.url(), title: await page.title() };'
+        ].join('\n')
+    };
 }
 
 async function refreshAdapters() {
@@ -66,29 +53,71 @@ async function refreshAdapters() {
     }
 }
 
-async function loadSource(adapterId) {
+async function loadAdapter(adapterId) {
     if (!adapterId) {
-        sourceCode.value = '';
+        form.value = { ...blankTemplate(''), script: '' };
         return;
     }
     loadingSource.value = true;
     try {
-        sourceCode.value = await settingsStore.fetchAdapterSource(adapterId);
+        const manifest = await settingsStore.fetchAdapter(adapterId);
+        form.value = {
+            id: manifest.id || adapterId,
+            name: manifest.name || adapterId,
+            description: manifest.description || '',
+            homePageUrl: manifest.homePageUrl || '',
+            inputJsonSchemaText: manifest.inputJsonSchema
+                ? JSON.stringify(manifest.inputJsonSchema, null, 2)
+                : '{\n  "type": "object",\n  "properties": {}\n}',
+            script: manifest.script || ''
+        };
     } catch (e) {
         message.error(e.message);
-        sourceCode.value = '';
     } finally {
         loadingSource.value = false;
     }
+}
+
+function buildPayloadFromForm() {
+    const trimmedId = String(form.value.id || '').trim();
+    if (!trimmedId) {
+        throw new Error('缺少 id');
+    }
+    if (!String(form.value.name || '').trim()) {
+        throw new Error('缺少 name');
+    }
+    if (typeof form.value.script !== 'string' || !form.value.script.trim()) {
+        throw new Error('script 不能为空');
+    }
+
+    let inputSchema = null;
+    const schemaText = String(form.value.inputJsonSchemaText || '').trim();
+    if (schemaText) {
+        try {
+            inputSchema = JSON.parse(schemaText);
+        } catch (e) {
+            throw new Error(`inputJsonSchema 不是合法 JSON: ${e.message}`);
+        }
+    }
+
+    return {
+        id: trimmedId,
+        name: String(form.value.name).trim(),
+        description: String(form.value.description || '').trim(),
+        homePageUrl: String(form.value.homePageUrl || '').trim(),
+        inputJsonSchema: inputSchema,
+        script: form.value.script
+    };
 }
 
 async function handleSave() {
     if (!selectedAdapterId.value) return;
     saving.value = true;
     try {
-        await settingsStore.saveAdapterSource(selectedAdapterId.value, sourceCode.value);
+        const payload = buildPayloadFromForm();
+        await settingsStore.saveAdapter(selectedAdapterId.value, payload);
         await refreshAdapters();
-        await loadSource(selectedAdapterId.value);
+        await loadAdapter(selectedAdapterId.value);
     } catch (e) {
         Modal.error({ title: '保存失败', content: e.message });
     } finally {
@@ -108,7 +137,8 @@ async function handleCreate() {
         return;
     }
     try {
-        await settingsStore.saveAdapterSource(adapterId, buildTemplate(adapterId));
+        const tpl = blankTemplate(adapterId);
+        await settingsStore.createAdapter(tpl);
         createVisible.value = false;
         await refreshAdapters();
         selectedAdapterId.value = adapterId;
@@ -126,16 +156,20 @@ function handleDelete() {
         okType: 'danger',
         cancelText: '取消',
         async onOk() {
-            await settingsStore.deleteAdapterSource(selectedAdapterId.value);
-            selectedAdapterId.value = '';
-            sourceCode.value = '';
-            await refreshAdapters();
+            try {
+                await settingsStore.deleteAdapterSource(selectedAdapterId.value);
+                selectedAdapterId.value = '';
+                form.value = { ...blankTemplate(''), script: '' };
+                await refreshAdapters();
+            } catch (e) {
+                Modal.error({ title: '删除失败', content: e.message });
+            }
         }
     });
 }
 
 watch(selectedAdapterId, async (adapterId) => {
-    await loadSource(adapterId);
+    await loadAdapter(adapterId);
 });
 
 onMounted(async () => {
@@ -186,25 +220,53 @@ onMounted(async () => {
 
                     <a-empty v-if="!selectedAdapterId" description="请选择或创建一个适配器脚本" />
                     <template v-else>
-                        <div class="schema-panel">
-                            <div>
-                                <div class="schema-title">接口路径</div>
-                                <code>{{ selectedAdapter?.endpoint }}</code>
-                            </div>
-                            <div>
-                                <div class="schema-title">输入 Schema</div>
-                                <pre class="schema-json">{{ JSON.stringify(selectedAdapter?.inputJsonSchema, null, 2) }}</pre>
-                            </div>
-                            <div>
-                                <div class="schema-title">输出 Schema</div>
-                                <pre class="schema-json">{{ JSON.stringify(selectedAdapter?.outputJsonSchema, null, 2) }}</pre>
-                            </div>
-                        </div>
+                        <a-alert
+                            type="info"
+                            show-icon
+                            style="margin-bottom: 16px;"
+                            message="脚本以 manifest.script 字符串形式提供。执行器注入 page, input, api, helpers, runtime 五个对象。"
+                        />
 
-                        <a-alert type="info" show-icon style="margin-bottom: 12px;"
-                            message="保存时仅做静态校验。接口测试请前往“请求 API”，页面级排障请使用 /admin/debug/run。" />
-
-                        <a-textarea v-model:value="sourceCode" :auto-size="{ minRows: 24, maxRows: 32 }" :disabled="loadingSource" style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;" />
+                        <a-form layout="vertical" :disabled="loadingSource">
+                            <a-row :gutter="12">
+                                <a-col :xs="24" :md="12">
+                                    <a-form-item label="id (创建后不可修改)">
+                                        <a-input v-model:value="form.id" disabled />
+                                    </a-form-item>
+                                </a-col>
+                                <a-col :xs="24" :md="12">
+                                    <a-form-item label="name">
+                                        <a-input v-model:value="form.name" placeholder="展示用名称" />
+                                    </a-form-item>
+                                </a-col>
+                            </a-row>
+                            <a-row :gutter="12">
+                                <a-col :xs="24" :md="12">
+                                    <a-form-item label="description">
+                                        <a-input v-model:value="form.description" placeholder="可选：脚本用途说明" />
+                                    </a-form-item>
+                                </a-col>
+                                <a-col :xs="24" :md="12">
+                                    <a-form-item label="homePageUrl">
+                                        <a-input v-model:value="form.homePageUrl" placeholder="例如：https://chatgpt.com" />
+                                    </a-form-item>
+                                </a-col>
+                            </a-row>
+                            <a-form-item label="inputJsonSchema (JSON，可选，仅用于 UI/文档)">
+                                <a-textarea
+                                    v-model:value="form.inputJsonSchemaText"
+                                    :auto-size="{ minRows: 4, maxRows: 10 }"
+                                    style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;"
+                                />
+                            </a-form-item>
+                            <a-form-item label="script (JavaScript 字符串)">
+                                <a-textarea
+                                    v-model:value="form.script"
+                                    :auto-size="{ minRows: 18, maxRows: 36 }"
+                                    style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;"
+                                />
+                            </a-form-item>
+                        </a-form>
                     </template>
                 </a-card>
             </a-col>
@@ -212,7 +274,7 @@ onMounted(async () => {
 
         <a-modal v-model:open="createVisible" title="新建适配器脚本" ok-text="创建" cancel-text="取消" @ok="handleCreate">
             <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 8px;">
-                适配器 ID 将同时作为文件名、manifest.id 与接口路径 /api/{adapter_id}。
+                适配器 ID 将作为文件名、manifest.id 与接口路径 /api/{adapter_id}，创建后不可修改。
             </div>
             <a-input v-model:value="newAdapterId" placeholder="例如: chatgpt" />
         </a-modal>
@@ -220,27 +282,9 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.schema-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    margin-bottom: 12px;
-}
-
-.schema-title {
-    font-weight: 600;
-    margin-bottom: 4px;
-}
-
-.schema-json {
-    background: #fafafa;
-    border: 1px solid #f0f0f0;
-    border-radius: 6px;
-    padding: 12px;
-    white-space: pre-wrap;
-    word-break: break-all;
+.label {
     font-size: 12px;
-    max-height: 240px;
-    overflow: auto;
+    color: #8c8c8c;
+    margin-bottom: 4px;
 }
 </style>

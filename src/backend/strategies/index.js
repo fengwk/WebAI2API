@@ -1,73 +1,68 @@
 /**
  * @fileoverview 负载均衡策略模块
- * @description Worker 选择策略，用于任务分发时智能选择 Worker。
  *
  * 策略类型：
- * - least_busy: 优先选择当前任务最少的 Worker
- * - round_robin: 轮询分配
- * - random: 随机分配
+ * - least_busy: 按 worker 负载（activeCount + pendingCount）升序选择
+ * - round_robin: 在可用 worker 中轮询
+ * - random:     在可用 worker 中随机选择
+ *
+ * 跳过不可用 worker：
+ *   - 不可用（isHealthy() = false）
+ *   - 本地队列已满（isLocalQueueFull() = true）
  */
 
-// ==========================================
-// 策略枚举
-// ==========================================
-
-/**
- * 策略枚举
- * @readonly
- */
 export const STRATEGIES = {
     LEAST_BUSY: 'least_busy',
     ROUND_ROBIN: 'round_robin',
-    RANDOM: 'random',
+    RANDOM: 'random'
 };
 
-// ==========================================
-// 策略选择器
-// ==========================================
+function getLoad(worker) {
+    if (typeof worker.load === 'number') return worker.load;
+    // 兼容：仅 busyCount
+    return worker.busyCount || 0;
+}
 
-/**
- * 创建策略选择器
- * @param {string} strategy - 策略名称
- * @returns {object} 策略选择器实例
- */
 export function createStrategySelector(strategy) {
     let roundRobinIndex = 0;
 
+    function isSelectable(worker) {
+        if (typeof worker.isHealthy === 'function' && !worker.isHealthy()) return false;
+        if (typeof worker.isLocalQueueFull === 'function' && worker.isLocalQueueFull()) return false;
+        return true;
+    }
+
     return {
         /**
-         * 根据策略排序候选列表
-         * @param {object[]} candidates - 候选列表（需有 busyCount 属性）
-         * @returns {object[]} 排序后的候选列表
+         * 根据策略排序候选列表（仅保留可用 worker）。
          */
         sort(candidates) {
-            if (candidates.length <= 1) return candidates;
+            const filtered = candidates.filter(isSelectable);
+            if (filtered.length === 0) return [];
+            if (filtered.length === 1) return filtered;
 
             switch (strategy) {
                 case STRATEGIES.ROUND_ROBIN: {
-                    const start = roundRobinIndex % candidates.length;
+                    const start = roundRobinIndex % filtered.length;
                     roundRobinIndex++;
-                    return [...candidates.slice(start), ...candidates.slice(0, start)];
+                    return [...filtered.slice(start), ...filtered.slice(0, start)];
                 }
                 case STRATEGIES.RANDOM: {
-                    return [...candidates].sort(() => Math.random() - 0.5);
+                    return [...filtered].sort(() => Math.random() - 0.5);
                 }
                 case STRATEGIES.LEAST_BUSY:
                 default: {
-                    return [...candidates].sort((a, b) => (a.busyCount || 0) - (b.busyCount || 0));
+                    return [...filtered].sort((a, b) => getLoad(a) - getLoad(b));
                 }
             }
         },
 
         /**
          * 选择单个最优候选
-         * @param {object[]} candidates - 候选列表
-         * @returns {object} 选中的候选
          */
         select(candidates) {
-            if (candidates.length === 0) return null;
-            if (candidates.length === 1) return candidates[0];
-            return this.sort(candidates)[0];
+            const sorted = this.sort(candidates);
+            return sorted[0] || null;
         }
     };
 }

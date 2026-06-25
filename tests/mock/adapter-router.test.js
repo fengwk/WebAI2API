@@ -23,23 +23,11 @@ async function withServer(handler, run) {
     }
 }
 
-test('adapter route validates body and enqueues task', async () => {
+test('adapter route enqueues task with parsed new-protocol fields', async () => {
     const adapter = {
         id: 'chatgpt',
         name: 'ChatGPT',
-        inputJsonSchema: {
-            type: 'object',
-            required: ['prompt'],
-            properties: { prompt: { type: 'string' } }
-        },
-        outputJsonSchema: {
-            type: 'object',
-            required: ['message'],
-            properties: { message: { type: 'string' } }
-        },
-        async execute() {
-            return { message: 'ok' };
-        }
+        script: 'return input;'
     };
     registry.adapters.set('chatgpt', adapter);
     registry.loaded = true;
@@ -62,42 +50,26 @@ test('adapter route validates body and enqueues task', async () => {
         const response = await fetch(`${baseUrl}/api/chatgpt`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt: 'hello' })
+            body: JSON.stringify({ input: { prompt: 'hello' }, debug: true })
         });
         assert.equal(response.status, 200);
     });
 
     assert.equal(capturedTask.adapterId, 'chatgpt');
     assert.deepEqual(capturedTask.input, { prompt: 'hello' });
+    assert.equal(capturedTask.debug, true);
 });
 
-test('adapter route returns validation error for bad input', async () => {
-    const adapter = {
-        id: 'gemini',
-        name: 'Gemini',
-        inputJsonSchema: {
-            type: 'object',
-            required: ['prompt'],
-            properties: { prompt: { type: 'string' } }
-        },
-        outputJsonSchema: {
-            type: 'object',
-            required: ['message'],
-            properties: { message: { type: 'string' } }
-        },
-        async execute() {
-            return { message: 'ok' };
-        }
-    };
+test('adapter route accepts empty body and defaults input to {}', async () => {
+    const adapter = { id: 'gemini', name: 'Gemini', script: 'return 1;' };
     registry.adapters.set('gemini', adapter);
     registry.loaded = true;
 
+    let captured = null;
     const router = createAdapterRouter({
         queueManager: {
             canAcceptNonStreaming: () => true,
-            addTask() {
-                throw new Error('should not queue');
-            },
+            addTask(task) { captured = task; task.res.end(); },
             getStatus: () => ({ total: 0 }),
             maxQueueSize: 10
         }
@@ -107,10 +79,11 @@ test('adapter route returns validation error for bad input', async () => {
         const response = await fetch(`${baseUrl}/api/gemini`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({})
+            body: ''
         });
-        assert.equal(response.status, 400);
-        const body = await response.json();
-        assert.match(body.error.message, /prompt/);
+        assert.equal(response.status, 200);
     });
+
+    assert.equal(captured.adapterId, 'gemini');
+    assert.deepEqual(captured.input, {});
 });

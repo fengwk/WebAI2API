@@ -9,12 +9,14 @@ export const useSettingsStore = defineStore('settings', {
         poolConfig: {
             strategy: 'least_busy',
             waitTimeout: 120,
+            queueBuffer: 2,
+            workerMaxPending: 10,
+            workerWaitTimeout: 300000,
             failover: {
                 enabled: false,
                 maxRetries: 3
             }
         },
-        adapterConfig: {},
         adaptersMeta: []
     }),
 
@@ -141,9 +143,12 @@ export const useSettingsStore = defineStore('settings', {
                     this.poolConfig = {
                         strategy: data.strategy || 'least_busy',
                         waitTimeout: data.waitTimeout ?? 120,
+                        queueBuffer: data.queueBuffer ?? 2,
+                        workerMaxPending: data.workerMaxPending ?? 10,
+                        workerWaitTimeout: data.workerWaitTimeout ?? 300000,
                         failover: {
-                            enabled: data.failover?.enabled || false,
-                            maxRetries: data.failover?.maxRetries || 3
+                            enabled: data.failover?.enabled ?? false,
+                            maxRetries: data.failover?.maxRetries ?? 3
                         }
                     };
                 }
@@ -169,7 +174,7 @@ export const useSettingsStore = defineStore('settings', {
             return false;
         },
 
-        // --- 适配器配置与元数据 ---
+        // --- 适配器元数据与脚本 ---
         async fetchAdaptersMeta() {
             try {
                 const res = await fetch('/admin/adapters', { headers: this.getHeaders() });
@@ -178,34 +183,8 @@ export const useSettingsStore = defineStore('settings', {
                 console.error('Fetch adapters meta failed', e);
             }
         },
-        async fetchAdapterConfig() {
-            try {
-                const res = await fetch('/admin/config/adapters', { headers: this.getHeaders() });
-                if (res.ok) this.adapterConfig = await res.json();
-            } catch (e) {
-                console.error('Fetch adapter config failed', e);
-            }
-        },
-        async saveAdapterConfig(config) {
-            try {
-                const res = await fetch('/admin/config/adapters', {
-                    method: 'POST',
-                    headers: this.getHeaders(),
-                    body: JSON.stringify(config)
-                });
-                const result = await this.handleResponse(res, '适配器设置保存成功');
-                if (result.success) {
-                    // 通过合并更新本地状态
-                    this.adapterConfig = { ...this.adapterConfig, ...config };
-                    return true;
-                }
-            } catch (e) {
-                Modal.error({ title: '保存失败 (网络异常)', content: e.message });
-            }
-            return false;
-        },
 
-        async fetchAdapterSource(adapterId) {
+        async fetchAdapter(adapterId) {
             const res = await fetch(`/admin/adapters/${encodeURIComponent(adapterId)}/source`, {
                 headers: this.getHeaders()
             });
@@ -213,14 +192,14 @@ export const useSettingsStore = defineStore('settings', {
             if (!res.ok) {
                 throw new Error(data.error?.message || data.message || `读取脚本失败: ${res.status}`);
             }
-            return data.source;
+            return data.manifest;
         },
 
-        async saveAdapterSource(adapterId, source) {
+        async saveAdapter(adapterId, manifest) {
             const res = await fetch(`/admin/adapters/${encodeURIComponent(adapterId)}/source`, {
                 method: 'PUT',
                 headers: this.getHeaders(),
-                body: JSON.stringify({ source })
+                body: JSON.stringify(manifest)
             });
             const data = await res.json();
             if (!res.ok) {
@@ -231,6 +210,20 @@ export const useSettingsStore = defineStore('settings', {
             } else {
                 Modal.warning({ title: '脚本已保存但无效', content: data.message || '请检查脚本错误' });
             }
+            return data;
+        },
+
+        async createAdapter(manifest) {
+            const res = await fetch('/admin/adapters', {
+                method: 'POST',
+                headers: this.getHeaders(),
+                body: JSON.stringify(manifest)
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.error?.message || data.message || `创建脚本失败: ${res.status}`);
+            }
+            message.success(data.message || '脚本已创建');
             return data;
         },
 

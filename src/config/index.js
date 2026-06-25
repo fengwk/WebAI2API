@@ -277,19 +277,18 @@ export function loadConfig() {
     // 设置队列配置默认值
     if (!config.queue) {
         config.queue = {
-            queueBuffer: 2
+            queueBuffer: 2,
+            workerMaxPending: 10,
+            workerWaitTimeout: 300000
         };
     } else {
         if (config.queue.queueBuffer === undefined) config.queue.queueBuffer = 2;
+        if (config.queue.workerMaxPending === undefined) config.queue.workerMaxPending = 10;
+        if (config.queue.workerWaitTimeout === undefined) config.queue.workerWaitTimeout = 300000;
     }
 
     // maxConcurrent 动态计算：等于 Workers 数量
     config.queue.maxConcurrent = config.backend.pool.workers.length;
-
-    // 初始化 adapter 配置容器
-    if (!config.backend.adapter) {
-        config.backend.adapter = {};
-    }
 
     // 设置日志级别
     if (config.logLevel) {

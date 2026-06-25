@@ -1,87 +1,201 @@
-# WebAI2API 动态适配器 KISS 设计
+# WebAI2API 动态适配器 KISS 设计（V1）
 
 ## 核心原则
 
-- 一个文件对应一个站点级 adapter
-- 一个 worker 只代表一套浏览器/登录态/代理配置
-- 一个 adapter 内部可以声明多个 provider entry
-- `execute()` 自己负责 `goto` 与页面收敛
-- 正式联调只走 `/v1/*`
-- `/admin/debug/run` 只保留为低层浏览器调试工具
+- 一个文件对应一个 adapter 能力脚本
+- 一个 worker 只绑定一个 `adapterId/type`
+- resident page 常驻，worker 默认串行执行
+- 正式执行与调试执行统一走：
 
-## 当前协议
+```http
+POST /api/{adapterId}
+```
+
+- 不再保留 `/admin/debug/run` 旁路
+
+---
+
+## 1. 统一脚本结构
 
 ```js
 export const manifest = {
-  id: 'chatgpt',
-  name: 'ChatGPT',
-  providers: [
-    {
-      type: 'openai-images-generations',
-      models: ['gpt-image-2'],
-      async execute(ctx, input) {}
+  id: 'chatgpt_image',
+  name: 'ChatGPT 图片生成',
+  description: '在 ChatGPT 页面生成图片',
+  homePageUrl: 'https://chatgpt.com',
+  inputJsonSchema: {
+    type: 'object',
+    properties: {
+      prompt: { type: 'string', title: '提示词' }
     },
-    {
-      type: 'openai-images-edits',
-      models: ['gpt-image-2'],
-      async execute(ctx, input) {}
-    }
-  ]
+    required: ['prompt']
+  },
+  script: `
+    await api.goto('https://chatgpt.com');
+    return { title: await page.title() };
+  `
 };
 ```
 
-## 为什么这样设计
+---
 
-### 1. 同站点能力不再拆成多个 worker
+## 2. 不再支持的旧结构
 
-例如 ChatGPT 文生图与图生图共享同一站点、登录态与页面逻辑。
+以下结构已废弃：
 
-如果拆成多个 adapter：
+- `providers[]`
+- `models`
+- `execute(ctx, input)`
+- `outputJsonSchema`
+- `timeoutMs`
 
-- worker 配置会膨胀
-- 同站点逻辑会重复
-- merge 会被滥用为“同站点多能力拼装器”
+脚本只有一套结构，不再做双结构兼容。
 
-改成一个 adapter 多 provider entry 后：
+---
 
-- worker 只需 `type: chatgpt`
-- 共享上传/下载/错误解析逻辑
-- merge 仅保留给跨站点聚合与故障转移
+## 3. 执行协议
 
-### 2. 页面职责归脚本自己
+请求体：
 
-协议里不再保留：
+```json
+{
+  "input": {},
+  "debug": false,
+  "workerId": "optional",
+  "overrideScript": "optional"
+}
+```
 
-- `getTargetUrl`
-- `navigationHandlers`
-- `homeUrl`
+### 行为
 
-这些都是站点行为，不是标准协议。
+- 无 `overrideScript`
+  - 执行 manifest.script
 
-## 运行时职责
+- 有 `overrideScript`
+  - 本次执行时覆盖 manifest.script
 
-- 加载 `/app/data/adapters/*.js`
-- 校验 `manifest.id/name/providers[]`
-- 根据 worker.type 找 adapter
-- 根据 `provider.type + model` 找 provider entry
-- 调用该 entry 的 `execute(ctx, input)`
+- 有 `workerId`
+  - 强制落到指定 worker
+  - 若 busy，则进入该 worker 本地 FIFO 队列
 
-## Admin 行为
+- `debug = true`
+  - 返回 `trace.steps / trace.captures / trace.logs`
 
-- `/admin/adapters`：显示脚本静态元数据
-- 保存脚本：只做静态校验
-- 不再保留 `/admin/adapters/:id/test`
-- `/admin/debug/run`：继续保留 raw script 浏览器调试
+---
 
-## 正式接口
+## 4. Worker 语义
 
-- `POST /v1/chat/completions`
-- `POST /v1/images/generations`
-- `POST /v1/images/edits`
+### 第一轮保持不变
 
-正式调用时由标准 provider 层完成：
+- 一个 worker 只支持一个 `adapterId`
+- 即：`worker.type === adapterId`
 
-- 请求归一化
-- 模型路由
-- 响应格式转换
-- 历史记录标准化
+这意味着：
+
+- sticky 调试通过 `workerId` 实现
+- 指定的 worker 必须和当前 adapterId 匹配
+
+---
+
+## 5. resident page 语义
+
+- worker 初始化时，会在 resident page 上最佳努力打开 `homePageUrl`
+- resident page 被关闭后，重建时也会再次尝试打开 `homePageUrl`
+- worker 所属浏览器上下文重建后，共享 worker 恢复时同样会重新打开 `homePageUrl`
+
+`homePageUrl` 的作用不是每次执行都强制跳转，而是：
+
+> 定义这个 worker 的 resident page 默认常驻站点。
+
+脚本本身仍然可以在执行过程中自行导航到其他页面。
+
+---
+
+## 6. 返回结构
+
+### 成功
+
+```json
+{
+  "ok": true,
+  "data": {},
+  "meta": {
+    "requestId": "req_xxx",
+    "adapterId": "chatgpt_image",
+    "workerId": "chatgpt-page",
+    "instanceId": "glatzsheryn",
+    "queuedMs": 120,
+    "durationMs": 3120,
+    "page": {
+      "url": "https://chatgpt.com",
+      "title": "ChatGPT"
+    }
+  }
+}
+```
+
+### 失败
+
+```json
+{
+  "ok": false,
+  "message": "错误信息",
+  "meta": { ... }
+}
+```
+
+### debug 模式
+
+额外附带：
+
+```json
+"trace": {
+  "steps": [],
+  "captures": [],
+  "logs": []
+}
+```
+
+---
+
+## 7. 队列模型
+
+队列分为两层：
+
+### 全局入口层
+- 使用 `queue.queueBuffer`
+- 全局入口上限 = `Workers数量 + queueBuffer`
+
+### worker 本地层
+- 使用 `queue.workerMaxPending`
+- 单 worker 本地 FIFO 队列上限
+- 使用 `queue.workerWaitTimeout`
+- 单请求在 worker 本地队列中的最长等待时间
+
+### 调度策略
+
+`least_busy` 的负载定义为：
+
+```text
+load = activeCount + pendingCount
+```
+
+---
+
+## 8. 文件产物原则
+
+- 所有 capture/saveFile 只对外返回 URL
+- 不返回本地路径
+- 内部可保留 `localPath`，但禁止出现在 API 响应中
+
+---
+
+## 9. KISS 结论
+
+第一轮 KISS 的核心就是：
+
+- **保留 instance / worker / resident page / 浏览器底座**
+- **统一脚本结构**
+- **统一执行入口**
+- **用 `workerId + overrideScript + debug` 覆盖调试需求**
+- **删除历史双结构与 debug 执行旁路**

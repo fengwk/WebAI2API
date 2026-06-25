@@ -319,16 +319,51 @@ const handleRemoveWorker = (index) => {
                 ]" />
             </div>
 
-            <!-- 生成等待超时 -->
+            <!-- 默认执行超时 -->
             <div style="margin-bottom: 24px;">
-                <div style="font-weight: 600; margin-bottom: 8px;">生成等待超时</div>
+                <div style="font-weight: 600; margin-bottom: 8px;">默认执行超时</div>
                 <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 12px;">
-                    等待 AI 生成结果的最长时间，单位：秒（默认 120 秒）
+                    单次脚本执行的默认等待时间，单位：秒（默认 120 秒）
                 </div>
                 <a-input-number v-model:value="poolConfig.waitTimeout" :min="30" :max="3600" :step="30"
                     style="width: 100%" placeholder="请输入超时秒数">
                     <template #addonAfter>秒</template>
                 </a-input-number>
+            </div>
+
+            <!-- 队列配置 -->
+            <div style="margin-bottom: 24px;">
+                <a-row :gutter="16">
+                    <a-col :xs="24" :md="8">
+                        <div style="margin-bottom: 8px;">
+                            <div style="font-weight: 600; margin-bottom: 8px;">全局入口缓冲区</div>
+                            <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 12px;">
+                                非流式请求的额外排队数。实际入口上限 = Workers 数量 + 缓冲区大小。
+                            </div>
+                            <a-input-number v-model:value="poolConfig.queueBuffer" :min="0" :max="100" style="width: 100%" />
+                        </div>
+                    </a-col>
+                    <a-col :xs="24" :md="8">
+                        <div style="margin-bottom: 8px;">
+                            <div style="font-weight: 600; margin-bottom: 8px;">Worker 本地队列上限</div>
+                            <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 12px;">
+                                单个 worker 本地 FIFO 等待队列的最大长度。
+                            </div>
+                            <a-input-number v-model:value="poolConfig.workerMaxPending" :min="1" :max="1000" style="width: 100%" />
+                        </div>
+                    </a-col>
+                    <a-col :xs="24" :md="8">
+                        <div style="margin-bottom: 8px;">
+                            <div style="font-weight: 600; margin-bottom: 8px;">Worker 队列等待超时</div>
+                            <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 12px;">
+                                单个请求在目标 worker 本地队列中的最长等待时间（毫秒）。
+                            </div>
+                            <a-input-number v-model:value="poolConfig.workerWaitTimeout" :min="1000" :max="3600000" :step="1000" style="width: 100%">
+                                <template #addonAfter>ms</template>
+                            </a-input-number>
+                        </div>
+                    </a-col>
+                </a-row>
             </div>
 
             <!-- 故障转移（折叠面板） -->
@@ -350,9 +385,9 @@ const handleRemoveWorker = (index) => {
                                 <div style="margin-bottom: 8px;">
                                     <div style="font-weight: 600; margin-bottom: 8px;">重试次数</div>
                                     <div style="font-size: 12px; color: #8c8c8c; margin-bottom: 12px;">
-                                        故障转移时最大重试次数，范围 1-10
+                                        故障转移时最大重试次数，范围 0-10（0 表示不限制）
                                     </div>
-                                    <a-input-number v-model:value="poolConfig.failover.maxRetries" :min="1" :max="10"
+                                    <a-input-number v-model:value="poolConfig.failover.maxRetries" :min="0" :max="10"
                                         :disabled="!poolConfig.failover.enabled" style="width: 100%" placeholder="请输入重试次数" />
                                 </div>
                             </a-col>

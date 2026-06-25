@@ -62,10 +62,15 @@ const QUEUE_BUFFER = config.queue?.queueBuffer ?? 2;
 /**
  * 队列管理器：负责任务队列、并发控制和心跳机制
  */
+const WORKER_MAX_PENDING = config.queue?.workerMaxPending ?? 10;
+const WORKER_WAIT_TIMEOUT = config.queue?.workerWaitTimeout ?? 300000;
+
 const queueManager = createQueueManager(
     {
         maxConcurrent: MAX_CONCURRENT,
-        queueBuffer: QUEUE_BUFFER
+        queueBuffer: QUEUE_BUFFER,
+        workerMaxPending: WORKER_MAX_PENDING,
+        workerWaitTimeout: WORKER_WAIT_TIMEOUT
     },
     {
         initBrowser,
@@ -159,7 +164,7 @@ async function startServer() {
         logger.info('服务器', `HTTP 服务器已启动，端口: ${PORT}${modeExtra}`);
         logger.info('服务器', `运行模式: ${mode}`);
         if (!isLoginMode) {
-            logger.info('服务器', `最大并发: ${MAX_CONCURRENT}，队列缓冲: ${QUEUE_BUFFER}`);
+            logger.info('服务器', `最大并发: ${MAX_CONCURRENT}，队列缓冲: ${QUEUE_BUFFER}，worker 本地队列上限: ${WORKER_MAX_PENDING}，worker 等待超时: ${WORKER_WAIT_TIMEOUT}ms`);
         }
     });
 }

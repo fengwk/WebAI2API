@@ -146,7 +146,9 @@ export function saveBrowserConfig(data) {
 export function getQueueConfig() {
     const config = readRawConfig();
     return {
-        queueBuffer: config.queue?.queueBuffer ?? 2
+        queueBuffer: config.queue?.queueBuffer ?? 2,
+        workerMaxPending: config.queue?.workerMaxPending ?? 10,
+        workerWaitTimeout: config.queue?.workerWaitTimeout ?? 300000
     };
 }
 
@@ -160,6 +162,8 @@ export function saveQueueConfig(data) {
     if (!config.queue) config.queue = {};
 
     if (data.queueBuffer !== undefined) config.queue.queueBuffer = data.queueBuffer;
+    if (data.workerMaxPending !== undefined) config.queue.workerMaxPending = data.workerMaxPending;
+    if (data.workerWaitTimeout !== undefined) config.queue.workerWaitTimeout = data.workerWaitTimeout;
 
     writeConfig(config);
 }
@@ -236,33 +240,6 @@ export function saveInstancesConfig(data) {
 }
 
 /**
- * 获取适配器配置
- * @returns {object}
- */
-export function getAdaptersConfig() {
-    const config = readRawConfig();
-    return config.backend?.adapter || {};
-}
-
-/**
- * 保存适配器配置
- * @param {object} data - 适配器配置（键值对）
- */
-export function saveAdaptersConfig(data) {
-    const config = readRawConfig();
-
-    if (!config.backend) config.backend = {};
-
-    // 合并而非覆盖，保留其他适配器配置
-    config.backend.adapter = {
-        ...(config.backend.adapter || {}),
-        ...data
-    };
-
-    writeConfig(config);
-}
-
-/**
  * 获取 Pool 配置（负载均衡和故障转移）
  * @returns {object}
  */
@@ -274,6 +251,9 @@ export function getPoolConfig() {
     return {
         strategy: pool.strategy || 'least_busy',
         waitTimeout: pool.waitTimeout != null ? Math.round(pool.waitTimeout / 1000) : 120,
+        queueBuffer: config.queue?.queueBuffer ?? 2,
+        workerMaxPending: config.queue?.workerMaxPending ?? 10,
+        workerWaitTimeout: config.queue?.workerWaitTimeout ?? 300000,
         failover: {
             enabled: failover.enabled !== false, // 默认 true
             maxRetries: failover.maxRetries ?? 2
@@ -290,6 +270,7 @@ export function savePoolConfig(data) {
 
     if (!config.backend) config.backend = {};
     if (!config.backend.pool) config.backend.pool = {};
+    if (!config.queue) config.queue = {};
 
     if (data.strategy !== undefined) {
         config.backend.pool.strategy = data.strategy;
@@ -299,6 +280,18 @@ export function savePoolConfig(data) {
         // 前端传入秒，写入 YAML 为毫秒
         const ms = Number(data.waitTimeout) * 1000;
         if (ms > 0) config.backend.pool.waitTimeout = ms;
+    }
+
+    if (data.queueBuffer !== undefined) {
+        config.queue.queueBuffer = data.queueBuffer;
+    }
+
+    if (data.workerMaxPending !== undefined) {
+        config.queue.workerMaxPending = data.workerMaxPending;
+    }
+
+    if (data.workerWaitTimeout !== undefined) {
+        config.queue.workerWaitTimeout = data.workerWaitTimeout;
     }
 
     if (data.failover) {

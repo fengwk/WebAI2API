@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { AdapterRegistry } from '../../src/backend/registry.js';
 
-function createManifest() {
+function createManifest(overrides = {}) {
     return {
         id: 'chatgpt',
         name: 'ChatGPT',
@@ -14,35 +14,24 @@ function createManifest() {
                 prompt: { type: 'string' }
             }
         },
-        outputJsonSchema: {
-            type: 'object',
-            required: ['message'],
-            properties: {
-                message: { type: 'string' }
-            }
-        },
-        async execute() {
-            return { message: 'ok' };
-        }
+        script: 'return { message: input.prompt };',
+        ...overrides
     };
 }
 
-test('registry accepts single-endpoint adapter manifest', () => {
+test('registry accepts new-style adapter manifest', () => {
     const registry = new AdapterRegistry();
     assert.deepEqual(registry.getManifestErrors(createManifest()), []);
 });
 
-test('registry rejects invalid schema manifest', () => {
+test('registry rejects manifest with both new and old fields', () => {
     const registry = new AdapterRegistry();
-    const errors = registry.getManifestErrors({
-        id: 'broken',
-        name: 'Broken',
-        inputJsonSchema: { type: 'unsupported' },
-        outputJsonSchema: {},
-        execute: null
-    });
-    assert.ok(errors.some(item => item.includes('inputJsonSchema.type')));
+    const errors = registry.getManifestErrors(createManifest({
+        outputJsonSchema: { type: 'object' },
+        execute: () => ({})
+    }));
     assert.ok(errors.some(item => item.includes('execute')));
+    assert.ok(errors.some(item => item.includes('outputJsonSchema')));
 });
 
 test('registry stores and returns adapter ids', () => {

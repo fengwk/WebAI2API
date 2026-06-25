@@ -30,15 +30,6 @@ export function validateServerConfig(data) {
         }
     }
 
-    // Queue Buffer 校验
-    if (data.queueBuffer !== undefined) {
-        if (typeof data.queueBuffer !== 'number' || !Number.isInteger(data.queueBuffer)) {
-            errors.push('queueBuffer 必须是整数');
-        } else if (data.queueBuffer < 0) {
-            errors.push('queueBuffer 不能为负数');
-        }
-    }
-
     if (data.publicFileBaseUrl !== undefined) {
         if (typeof data.publicFileBaseUrl !== 'string') {
             errors.push('publicFileBaseUrl 必须是字符串');
@@ -209,10 +200,50 @@ export function validateInstancesConfig(data) {
 export function validatePoolConfig(data) {
     const errors = [];
 
+    if (!data || typeof data !== 'object') {
+        return { valid: false, errors: ['pool 配置必须是对象'] };
+    }
+
     // Strategy 校验
     if (data.strategy !== undefined) {
         if (!['least_busy', 'round_robin', 'random'].includes(data.strategy)) {
             errors.push('strategy 必须是 least_busy、round_robin 或 random');
+        }
+    }
+
+    // waitTimeout 校验（前端使用秒）
+    if (data.waitTimeout !== undefined) {
+        if (typeof data.waitTimeout !== 'number' || !Number.isInteger(data.waitTimeout)) {
+            errors.push('waitTimeout 必须是整数秒');
+        } else if (data.waitTimeout < 1) {
+            errors.push('waitTimeout 必须 >= 1 秒');
+        }
+    }
+
+    // 全局入口缓冲区大小
+    if (data.queueBuffer !== undefined) {
+        if (typeof data.queueBuffer !== 'number' || !Number.isInteger(data.queueBuffer)) {
+            errors.push('queueBuffer 必须是整数');
+        } else if (data.queueBuffer < 0) {
+            errors.push('queueBuffer 不能为负数');
+        }
+    }
+
+    // 单 worker 本地队列上限
+    if (data.workerMaxPending !== undefined) {
+        if (typeof data.workerMaxPending !== 'number' || !Number.isInteger(data.workerMaxPending)) {
+            errors.push('workerMaxPending 必须是整数');
+        } else if (data.workerMaxPending < 1) {
+            errors.push('workerMaxPending 必须 >= 1');
+        }
+    }
+
+    // 单 worker 本地等待超时（毫秒）
+    if (data.workerWaitTimeout !== undefined) {
+        if (typeof data.workerWaitTimeout !== 'number' || !Number.isInteger(data.workerWaitTimeout)) {
+            errors.push('workerWaitTimeout 必须是整数毫秒');
+        } else if (data.workerWaitTimeout < 1000) {
+            errors.push('workerWaitTimeout 必须 >= 1000ms');
         }
     }
 
@@ -231,17 +262,4 @@ export function validatePoolConfig(data) {
     }
 
     return { valid: errors.length === 0, errors };
-}
-
-/**
- * 校验 Adapters 配置
- * @param {object} data - 适配器配置
- * @returns {{valid: boolean, errors: string[]}}
- */
-export function validateAdaptersConfig(data) {
-    if (typeof data !== 'object' || data === null) {
-        return { valid: false, errors: ['adapters 配置必须是对象'] };
-    }
-
-    return { valid: true, errors: [] };
 }
