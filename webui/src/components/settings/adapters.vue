@@ -8,9 +8,12 @@ const settingsStore = useSettingsStore();
 const loadingList = ref(false);
 const loadingSource = ref(false);
 const saving = ref(false);
+const deleting = ref(false);
 const selectedAdapterId = ref('');
 const createVisible = ref(false);
 const newAdapterId = ref('');
+
+const inputJsonSchemaError = ref('');
 
 // 表单字段（创建时为可输入 id；编辑时 id 锁定为只读）
 const form = ref({
@@ -95,8 +98,11 @@ function buildPayloadFromForm() {
     if (schemaText) {
         try {
             inputSchema = JSON.parse(schemaText);
+            inputJsonSchemaError.value = '';
         } catch (e) {
-            throw new Error(`inputJsonSchema 不是合法 JSON: ${e.message}`);
+            const detail = `inputJsonSchema 不是合法 JSON: ${e.message}`;
+            inputJsonSchemaError.value = detail;
+            throw new Error(detail);
         }
     }
 
@@ -115,11 +121,18 @@ async function handleSave() {
     saving.value = true;
     try {
         const payload = buildPayloadFromForm();
+        inputJsonSchemaError.value = '';
         await settingsStore.saveAdapter(selectedAdapterId.value, payload);
         await refreshAdapters();
         await loadAdapter(selectedAdapterId.value);
     } catch (e) {
-        Modal.error({ title: '保存失败', content: e.message });
+        const msg = String(e.message || '');
+        if (msg.includes('inputJsonSchema 不是合法 JSON')) {
+            inputJsonSchemaError.value = msg;
+            message.warning('inputJsonSchema 不是合法 JSON，请修正后再保存');
+        } else {
+            Modal.error({ title: '保存失败', content: msg });
+        }
     } finally {
         saving.value = false;
     }
@@ -149,20 +162,28 @@ async function handleCreate() {
 
 function handleDelete() {
     if (!selectedAdapterId.value) return;
+    if (deleting.value) return;
+    deleting.value = true;
+    const targetId = selectedAdapterId.value;
     Modal.confirm({
         title: '删除适配器脚本',
-        content: `确定要删除 ${selectedAdapterId.value} 吗？`,
+        content: `确定要删除 ${targetId} 吗？`,
         okText: '删除',
         okType: 'danger',
         cancelText: '取消',
+        onCancel() {
+            deleting.value = false;
+        },
         async onOk() {
             try {
-                await settingsStore.deleteAdapterSource(selectedAdapterId.value);
+                await settingsStore.deleteAdapterSource(targetId);
                 selectedAdapterId.value = '';
                 form.value = { ...blankTemplate(''), script: '' };
                 await refreshAdapters();
             } catch (e) {
                 Modal.error({ title: '删除失败', content: e.message });
+            } finally {
+                deleting.value = false;
             }
         }
     });
@@ -170,6 +191,19 @@ function handleDelete() {
 
 watch(selectedAdapterId, async (adapterId) => {
     await loadAdapter(adapterId);
+});
+
+watch(() => form.value.inputJsonSchemaText, (text) => {
+    if (!text) {
+        inputJsonSchemaError.value = '';
+        return;
+    }
+    try {
+        JSON.parse(text);
+        inputJsonSchemaError.value = '';
+    } catch (e) {
+        inputJsonSchemaError.value = `inputJsonSchema 不是合法 JSON: ${e.message}`;
+    }
 });
 
 onMounted(async () => {
@@ -213,7 +247,7 @@ onMounted(async () => {
                 <a-card :title="selectedAdapterId ? `编辑脚本 - ${selectedAdapterId}` : '适配器脚本编辑器'" :bordered="false">
                     <template #extra>
                         <a-space>
-                            <a-button danger @click="handleDelete" :disabled="!selectedAdapterId">删除</a-button>
+                            <a-button danger @click="handleDelete" :disabled="!selectedAdapterId || deleting" :loading="deleting">删除</a-button>
                             <a-button type="primary" @click="handleSave" :loading="saving" :disabled="!selectedAdapterId">保存</a-button>
                         </a-space>
                     </template>
