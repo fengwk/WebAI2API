@@ -11,14 +11,27 @@
 export const manifest = {
   id: 'chatgpt',
   name: 'ChatGPT',
-  description: '在 ChatGPT 页面中执行对话，支持固定会话复用，并优先通过上游会话流还原 Markdown 文本。',
+  description: '在 ChatGPT 页面中执行对话，支持固定会话复用。支持 prompt + attachments 多模态输入（通过正常对话实现图片生成/编辑）。优先通过 conversation 流协议还原文本 + 图片（role=tool && async_task_type=image_gen）。',
   homePageUrl: 'https://chatgpt.com',
   inputJsonSchema: {
     type: 'object',
     required: ['prompt'],
     properties: {
       prompt: { type: 'string', title: '提示词' },
-      sessionId: { type: 'string', title: '会话 ID（可选，传入后进入指定对话）' }
+      sessionId: { type: 'string', title: '会话 ID（可选，传入后进入指定对话）' },
+      attachments: {
+        type: 'array',
+        title: '附件列表（支持图片，用于多模态对话、图片生成/编辑）',
+        items: {
+          type: 'object',
+          properties: {
+            dataUrl: { type: 'string', title: 'data:xxx;base64,...' },
+            url: { type: 'string', title: 'https://...' },
+            fileName: { type: 'string' },
+            mimeType: { type: 'string' }
+          }
+        }
+      }
     }
   },
   script: `
@@ -116,7 +129,279 @@ function assistantText(event, currentText) {
     const text = assistantMessageText(message);
     if (text) return text;
   }
-  return applyTextPatch(event, currentText);
+
+  return currentText;
+}
+
+function isImageToolEvent(event) {
+  const candidates = [event, event && event.v, event && event.message];
+  for (const cand of candidates) {
+    if (!cand || typeof cand !== "object") continue;
+    const message = cand.message || (cand.v && cand.v.message) || cand;
+    if (!message || typeof message !== "object") continue;
+    const role = String((message.author && message.author.role) || "").toLowerCase().trim();
+    const meta = message.metadata || {};
+    if (role === "tool" && meta.async_task_type === "image_gen") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function extractImagePointers(event) {
+  const pointers = [];
+  const candidates = [event, event && event.v];
+  for (const cand of candidates) {
+    if (!cand || typeof cand !== "object") continue;
+    const message = cand.message || (cand.v && cand.v.message);
+    if (!message || typeof message !== "object") continue;
+    const content = message.content || {};
+    const parts = content.parts || [];
+    const collect = (val) => {
+      if (typeof val === "string") {
+        let m = val.match(/file-service:\\/\\/([A-Za-z0-9_-]+)/);
+        if (m) pointers.push({ type: "file-service", id: m[1] });
+        m = val.match(/sediment:\\/\\/([A-Za-z0-9_-]+)/);
+        if (m) pointers.push({ type: "sediment", id: m[1] });
+      } else if (val && typeof val === "object" && val.asset_pointer) {
+        const ap = String(val.asset_pointer);
+        let m = ap.match(/file-service:\\/\\/([A-Za-z0-9_-]+)/);
+        if (m) pointers.push({ type: "file-service", id: m[1] });
+        m = ap.match(/sediment:\\/\\/([A-Za-z0-9_-]+)/);
+        if (m) pointers.push({ type: "sediment", id: m[1] });
+      }
+    };
+    if (Array.isArray(parts)) parts.forEach(collect);
+    else collect(parts);
+  }
+  return pointers;
+}
+
+function extractConversationId(event) {
+  const cands = [event, event && event.v];
+  for (const c of cands) {
+    if (c && typeof c === "object") {
+      if (c.conversation_id) return String(c.conversation_id);
+      if (c.v && c.v.conversation_id) return String(c.v.conversation_id);
+      if (c.message && c.message.conversation_id) return String(c.message.conversation_id);
+    }
+  }
+  return null;
+}
+
+function extractToolInvoked(event) {
+  if (event && event.type === "server_ste_metadata") {
+    const meta = event.metadata || (event.v && event.v.metadata);
+    if (meta && typeof meta.tool_invoked === "boolean") return meta.tool_invoked;
+  }
+  return null;
+}
+
+async function uploadAttachments(attachments) {
+  if (!attachments || !attachments.length) return 0;
+  const tempPaths = [];
+  for (const att of attachments) {
+    try {
+      const saved = await helpers.files.resolve(att, { prefix: "attach" });
+      if (saved && saved.path) tempPaths.push(saved.path);
+    } catch (e) { /* ignore */ }
+  }
+  if (!tempPaths.length) return 0;
+  const selectors = [
+    'button[aria-label*="Attach"]',
+    'button[aria-label*="attach"]',
+    'button[aria-label*="上传"]',
+    '[data-testid*="attach"] button'
+  ];
+  let triggered = false;
+  for (const sel of selectors) {
+    const btn = page.locator(sel).first();
+    if (await btn.count().catch(() => 0) > 0) {
+      try {
+        const fcP = page.waitForEvent("filechooser", { timeout: 8000 });
+        await btn.click({ timeout: 4000 }).catch(() => null);
+        const fc = await fcP;
+        await fc.setFiles(tempPaths);
+        triggered = true;
+        await page.waitForTimeout(1200).catch(() => null);
+        break;
+      } catch (e) {}
+    }
+  }
+  return tempPaths.length;
+}
+
+async function resolvePointers(pointers, conversationId) {
+  const results = [];
+  const seen = new Set();
+  for (const p of pointers) {
+    const key = p.type + ":" + p.id;
+    if (seen.has(key)) continue; seen.add(key);
+    let dl = "";
+    try {
+      if (p.type === "file-service") {
+        const r = await page.request.get("https://chatgpt.com/backend-api/files/" + p.id + "/download", { timeout: 30000 });
+        if (r.ok()) {
+          const j = await r.json().catch(() => ({}));
+          dl = j.download_url || j.url || "";
+        }
+      } else if (p.type === "sediment" && conversationId) {
+        const r = await page.request.get("https://chatgpt.com/backend-api/conversation/" + conversationId + "/attachment/" + p.id + "/download", { timeout: 30000 });
+        if (r.ok()) {
+          const j = await r.json().catch(() => ({}));
+          dl = j.download_url || j.url || "";
+        }
+      }
+    } catch (e) {}
+    if (!dl) continue;
+    try {
+      const imgR = await page.request.get(dl, { timeout: 90000 });
+      if (imgR.ok()) {
+        const buf = await imgR.body();
+        const saved = await api.saveFile({
+          relativePath: "images/chatgpt_img_" + Date.now() + "_" + p.id.slice(0,8) + ".png",
+          content: buf,
+          mimeType: "image/png"
+        });
+        results.push({ url: saved.url, pointerType: p.type, id: p.id });
+      }
+    } catch (e) {}
+  }
+  return results;
+}
+
+function imageMimeToExtension(mimeType) {
+  const normalized = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  if (normalized === 'image/png') return 'png';
+  if (normalized === 'image/jpeg') return 'jpg';
+  if (normalized === 'image/webp') return 'webp';
+  if (normalized === 'image/gif') return 'gif';
+  return 'bin';
+}
+
+async function collectDomImageCandidates() {
+  return await page.evaluate(() => {
+    const out = [];
+    const seen = new Set();
+    const nodes = Array.from(document.querySelectorAll('img'));
+    for (const node of nodes) {
+      if (!(node.offsetWidth || node.offsetHeight)) continue;
+      const src = String(node.currentSrc || node.getAttribute('src') || '').trim();
+      if (!src || seen.has(src)) continue;
+      const width = Number(node.naturalWidth || node.width || 0);
+      const height = Number(node.naturalHeight || node.height || 0);
+      const alt = String(node.getAttribute('alt') || '').trim();
+      const likelyGenerated = (width >= 256 && height >= 256)
+        && (
+          src.includes('/backend-api/estuary/content')
+          || src.startsWith('blob:')
+          || src.startsWith('data:image/')
+          || alt.toLowerCase().includes('generated image')
+        );
+      if (!likelyGenerated) continue;
+      seen.add(src);
+      out.push({ src, alt, width, height });
+    }
+    return out;
+  }).catch(() => []);
+}
+
+async function fetchBrowserBlobAsDataUrl(src) {
+  return await page.evaluate(async imageSrc => {
+    try {
+      const response = await fetch(imageSrc);
+      const blob = await response.blob();
+      return await new Promise(resolve => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return '';
+    }
+  }, src).catch(() => '');
+}
+
+async function resolveDomImages(candidates) {
+  const results = [];
+  for (const item of candidates || []) {
+    const src = String(item && item.src || '').trim();
+    if (!src) continue;
+    try {
+      let buffer = null;
+      let mimeType = 'image/png';
+      if (/^https?:\\/\\//i.test(src)) {
+        const response = await page.request.get(src, { timeout: 90000 });
+        if (!response.ok()) continue;
+        mimeType = response.headers()['content-type'] || mimeType;
+        buffer = await response.body();
+      } else if (src.startsWith('data:')) {
+        const match = /^data:([^;]+);base64,(.+)$/s.exec(src);
+        if (!match) continue;
+        mimeType = match[1].trim().toLowerCase();
+        buffer = Buffer.from(match[2], 'base64');
+      } else if (src.startsWith('blob:')) {
+        const dataUrl = await fetchBrowserBlobAsDataUrl(src);
+        const match = /^data:([^;]+);base64,(.+)$/s.exec(dataUrl);
+        if (!match) continue;
+        mimeType = match[1].trim().toLowerCase();
+        buffer = Buffer.from(match[2], 'base64');
+      }
+      if (!buffer || !buffer.length) continue;
+      const ext = imageMimeToExtension(mimeType);
+      const saved = await api.saveFile({
+        relativePath: 'images/chatgpt_dom_' + Date.now() + '_' + results.length + '.' + ext,
+        content: buffer,
+        mimeType
+      });
+      results.push({
+        url: saved.url,
+        pointerType: 'dom',
+        src,
+        alt: item.alt || '',
+        width: item.width || 0,
+        height: item.height || 0
+      });
+    } catch (e) {}
+  }
+  return results;
+}
+
+async function pollConversationImages(conversationId, maxMs = 180000) {
+  const start = Date.now();
+  const filePat = /file-service:\\/\\/([A-Za-z0-9_-]+)/g;
+  const sedPat = /sediment:\\/\\/([A-Za-z0-9_-]+)/g;
+  while (Date.now() - start < maxMs) {
+    try {
+      const r = await page.request.get("https://chatgpt.com/backend-api/conversation/" + conversationId, {
+        timeout: 30000, headers: { Accept: "application/json" }
+      });
+      if (r.ok()) {
+        const data = await r.json();
+        const mapping = data.mapping || {};
+        const found = [];
+        for (const mid in mapping) {
+          const m = (mapping[mid] || {}).message || {};
+          const author = m.author || {};
+          const meta = m.metadata || {};
+          if (author.role !== "tool" || meta.async_task_type !== "image_gen") continue;
+          const parts = (m.content && m.content.parts) || [];
+          for (const part of parts) {
+            const txt = typeof part === "string" ? part : (part && part.asset_pointer ? String(part.asset_pointer) : "");
+            let m;
+            while ((m = filePat.exec(txt)) !== null) found.push({ type: "file-service", id: m[1] });
+            filePat.lastIndex = 0;
+            while ((m = sedPat.exec(txt)) !== null) found.push({ type: "sediment", id: m[1] });
+            sedPat.lastIndex = 0;
+          }
+        }
+        if (found.length > 0) return found;
+      }
+    } catch (e) {}
+    await page.waitForTimeout(3500).catch(() => null);
+  }
+  return [];
 }
 
 async function sampleUiState() {
@@ -158,6 +443,20 @@ async function snapshotVisibleMessages(role) {
         text: (node.innerText || '').trim().slice(0, 500)
       }));
   }, role).catch(() => []);
+}
+
+async function sampleNewAssistantText(baselineIds) {
+  return await page.evaluate((baseline) => {
+    const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+    const texts = [];
+    for (const node of nodes) {
+      const id = node.getAttribute('data-message-id');
+      if (id && baseline.includes(id)) continue;
+      const text = String(node.innerText || '').trim();
+      if (text) texts.push(text);
+    }
+    return texts.join('\\n\\n');
+  }, baselineIds).catch(() => '');
 }
 
 async function dismissAnyDialog() {
@@ -307,7 +606,11 @@ function makeProgressState() {
     firstProgressAt: null,
     lastProgressAt: null,
     encodedItems: [],
-    wsTrace: []
+    wsTrace: [],
+    // image support (additive, does not affect text path)
+    conversationId: null,
+    toolInvoked: null,
+    imagePointers: []
   };
 }
 
@@ -381,6 +684,34 @@ const onWebSocket = ws => {
               progress.wsTrace.push({ ts, kind: 'turn-complete', topicId, preview: JSON.stringify(item).slice(0, 220) });
             }
           }
+
+        // image detection from WS (protocol first) immediately after turn-complete handling, inside for (item of parsed)
+        try {
+          const candidates = [item, inner, item && item.payload && item.payload.payload];
+          let detected = false;
+          for (const cand of candidates) {
+            if (isImageToolEvent(cand)) {
+              detected = true;
+              const ptrs = extractImagePointers(cand);
+              if (Array.isArray(ptrs)) {
+                for (const p of ptrs) {
+                  if (!p || !p.id) continue;
+                  const exists = progress.imagePointers.some(pp => pp.type === p.type && pp.id === p.id);
+                  if (!exists) progress.imagePointers.push(p);
+                }
+              }
+            }
+          }
+          for (const cand of candidates) {
+            const cid = extractConversationId(cand);
+            if (cid && !progress.conversationId) progress.conversationId = cid;
+            const ti = extractToolInvoked(cand);
+            if (ti !== null) progress.toolInvoked = ti;
+          }
+          if (detected && progress.wsTrace.length < 40) {
+            progress.wsTrace.push({ ts, kind: "image-tool", topicId, preview: "image_gen tool detected" });
+          }
+        } catch (e) {}
         }
       }
     } catch {}
@@ -455,6 +786,11 @@ try {
   log('composer prepared', { composerTextPreview: composerText.slice(0, 120) });
   await dismissAnyDialog();
 
+  if (input.attachments && input.attachments.length) {
+    const attached = await uploadAttachments(input.attachments);
+    log("attachments processed", { count: attached });
+  }
+
   progress.sendStartedAt = Date.now() - t0;
   const sendBtn = page.locator('button[data-testid="send-button"]');
   try {
@@ -524,6 +860,16 @@ try {
     }
 
     if (Date.now() - waitStart > NO_PROGRESS_FAIL_MS && progress.firstProgressAt === null) {
+      const domPreview = await sampleNewAssistantText(baselineIds);
+      if (!wsReady || ui.stopVisible || ui.streamingCount > 0 || domPreview) {
+        log('stream unavailable, switching to dom fallback', {
+          wsReady,
+          stopVisible: ui.stopVisible,
+          streamingCount: ui.streamingCount,
+          domPreview: domPreview.slice(0, 120)
+        });
+        break;
+      }
       throw new Error('NO_STREAM_PROGRESS:' + JSON.stringify(ui));
     }
 
@@ -606,20 +952,59 @@ try {
     await page.waitForTimeout(500, { timeout: 1500 }).catch(() => null);
   }
 
-  const reply = String(currentText || '').trim() || String(domText || '').trim();
-  const source = currentText ? 'stream' : 'dom_fallback';
-  if (!reply) {
+  const reply = String(currentText || "").trim() || String(domText || "").trim();
+  const source = currentText ? "stream" : "dom_fallback";
+
+  // Resolve images from WS stream pointers first; fallback to poll if needed
+  let images = [];
+  let imagesSource = null;
+  try {
+    let pointers = Array.isArray(progress.imagePointers) ? progress.imagePointers.slice() : [];
+    if ((!pointers || pointers.length === 0) && progress.conversationId) {
+      const polled = await pollConversationImages(progress.conversationId, 120000).catch(() => []);
+      if (Array.isArray(polled) && polled.length > 0) {
+        pointers = polled;
+        imagesSource = "poll";
+      }
+    } else if (pointers.length > 0) {
+      imagesSource = "stream";
+    }
+    if (pointers.length > 0) {
+      images = await resolvePointers(pointers, progress.conversationId || requestedSid).catch(() => []);
+    }
+  } catch (e) {
+    // do not break text path on image errors
+  }
+
+  if ((!images || images.length === 0)) {
+    const domImageCandidates = await collectDomImageCandidates().catch(() => []);
+    if (domImageCandidates.length > 0) {
+      const domImages = await resolveDomImages(domImageCandidates).catch(() => []);
+      if (domImages.length > 0) {
+        images = domImages;
+        imagesSource = 'dom';
+        log('dom images resolved', { count: domImages.length, preview: domImages[0] });
+      }
+    }
+  }
+
+  if (!reply && images.length === 0) {
     const ui = await sampleUiState();
-    throw new Error('EMPTY_REPLY:' + JSON.stringify(ui));
+    throw new Error("EMPTY_REPLY:" + JSON.stringify(ui));
   }
 
   return {
     sessionId: extractSessionId(page.url()) || requestedSid || null,
     url: page.url(),
-    title: await page.title().catch(() => ''),
-    format: 'markdown',
+    title: await page.title().catch(() => ""),
+    format: "markdown",
     reply,
     source,
+    images,
+    imagesSource,
+    hasImages: Array.isArray(images) && images.length > 0,
+    toolInvoked: progress.toolInvoked,
+    conversationId: progress.conversationId || extractSessionId(page.url()) || requestedSid || null,
     meta: {
       turnCompleteSeen: progress.turnCompleteSeen,
       messageStreamCompleteSeen: progress.messageStreamCompleteSeen,

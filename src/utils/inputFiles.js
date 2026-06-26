@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { resolveUploadedFile } from '../backend/uploadStore.js';
 
 const MIME_EXTENSION_MAP = {
     'image/png': 'png',
@@ -113,6 +114,13 @@ export async function saveInputValueToTempFile(value, options = {}) {
     }
 
     if (value && typeof value === 'object') {
+        if (typeof value.uploadId === 'string' && value.uploadId.trim()) {
+            return await resolveUploadedFile(value.uploadId.trim(), {
+                tempDir: options.tempDir,
+                fileName: value.fileName,
+                mimeType: value.mimeType
+            });
+        }
         if (Buffer.isBuffer(value.buffer)) {
             return await saveBufferToTempFile(value.buffer, {
                 ...options,

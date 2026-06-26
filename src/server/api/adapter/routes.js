@@ -137,7 +137,6 @@ export function createAdapterRouter(context) {
 
             const rawBody = await readJsonBody(req);
             const { input, debug, workerId, overrideScript } = normalizeRequestBody(rawBody);
-
             // 入队：把新协议字段透传给 queue
             queueManager.addTask({
                 res,

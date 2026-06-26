@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { createAdapterRouter } from './adapter/routes.js';
 import { createAdminRouter } from './admin/routes.js';
+import { createUploadRouter } from './uploads/routes.js';
 
 const MIME_TYPES = {
     '.html': 'text/html; charset=utf-8',
@@ -32,6 +33,7 @@ const PUBLIC_FILES_DIR = path.join(process.cwd(), 'data', 'files');
 export function createGlobalRouter(context) {
     const { config, queueManager, tempDir, loginMode, getSafeMode } = context;
     const handleAdapterRequest = loginMode ? null : createAdapterRouter(context);
+    const handleUploadRequest = loginMode ? null : createUploadRouter(context);
     const handleAdminRequest = createAdminRouter({ config, queueManager, tempDir, getSafeMode });
 
     return async function handleRequest(req, res) {
@@ -116,6 +118,11 @@ export function createGlobalRouter(context) {
                 res.end(JSON.stringify({
                     error: { message: '服务运行在登录模式，API 不可用', type: 'service_unavailable' }
                 }));
+                return;
+            }
+
+            if (pathname === '/api/uploads') {
+                await handleUploadRequest(req, res);
                 return;
             }
 
