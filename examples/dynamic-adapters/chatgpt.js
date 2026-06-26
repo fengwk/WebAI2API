@@ -51,6 +51,52 @@ const log = (message, extra = {}) => {
   api.log('info', message, extra);
 };
 
+const uploadNetwork = {
+  active: false,
+  seq: 0,
+  startedAt: null,
+  lastEventAt: null,
+  events: [],
+  pending: new Map()
+};
+const uploadRequestIds = new WeakMap();
+
+function recordUploadNetworkEvent(entry) {
+  uploadNetwork.lastEventAt = Date.now();
+  if (uploadNetwork.events.length >= 200) uploadNetwork.events.shift();
+  uploadNetwork.events.push(entry);
+}
+
+function resetUploadNetworkTracking() {
+  uploadNetwork.active = false;
+  uploadNetwork.seq = 0;
+  uploadNetwork.startedAt = null;
+  uploadNetwork.lastEventAt = null;
+  uploadNetwork.events = [];
+  uploadNetwork.pending.clear();
+}
+
+function snapshotUploadNetwork() {
+  return {
+    active: uploadNetwork.active,
+    startedAt: uploadNetwork.startedAt,
+    lastEventAt: uploadNetwork.lastEventAt,
+    totalEvents: uploadNetwork.events.length,
+    pending: Array.from(uploadNetwork.pending.values()).slice(0, 20),
+    recentEvents: uploadNetwork.events.slice(-20)
+  };
+}
+
+function isAttachmentTransferRequest(request) {
+  const url = String(request && typeof request.url === 'function' ? request.url() : '').trim();
+  const method = String(request && typeof request.method === 'function' ? request.method() : '').toUpperCase().trim();
+  if (!url) return false;
+  if (!/chatgpt\\.com\//i.test(url)) return false;
+  if (/(upload|attachment|asset|file)/i.test(url)) return true;
+  if (method && method !== 'GET' && /backend-api/i.test(url)) return true;
+  return false;
+}
+
 function extractSessionId(url) {
   return (String(url || '').match(/\\/c\\/([0-9a-f-]{8,})/i) || [])[1] || null;
 }
@@ -197,38 +243,513 @@ function extractToolInvoked(event) {
   return null;
 }
 
-async function uploadAttachments(attachments) {
-  if (!attachments || !attachments.length) return 0;
-  const tempPaths = [];
-  for (const att of attachments) {
-    try {
-      const saved = await helpers.files.resolve(att, { prefix: "attach" });
-      if (saved && saved.path) tempPaths.push(saved.path);
-    } catch (e) { /* ignore */ }
+async function inspectAttachmentUi(expectedFileNames = []) {
+  return await page.evaluate((expectedNames) => {
+    const normalize = text => String(text || '').replace(/\\s+/g, ' ').trim();
+    const isVisible = node => !!(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+    const expected = Array.isArray(expectedNames)
+      ? expectedNames.map(name => normalize(name).toLowerCase()).filter(Boolean)
+      : [];
+
+    const actionCandidates = Array.from(document.querySelectorAll('button, [role="button"], label'))
+      .filter(isVisible)
+      .map(node => ({
+        tag: node.tagName.toLowerCase(),
+        text: normalize(node.innerText || '').slice(0, 120),
+        aria: String(node.getAttribute('aria-label') || '').slice(0, 120),
+        testId: String(node.getAttribute('data-testid') || '').slice(0, 120)
+      }))
+      .filter(item => /attach|upload|file|image|photo|plus|附件|上传|文件|图片|照片/i.test(
+        [item.text, item.aria, item.testId].join(' ')
+      ))
+      .slice(0, 20);
+
+    const fileInputs = Array.from(document.querySelectorAll('input[type="file"]')).map((node, index) => ({
+      index,
+      visible: isVisible(node),
+      multiple: !!node.multiple,
+      accept: String(node.getAttribute('accept') || ''),
+      aria: String(node.getAttribute('aria-label') || ''),
+      testId: String(node.getAttribute('data-testid') || ''),
+      value: String(node.value || '')
+    }));
+
+    const bodyText = normalize(document.body.innerText || '');
+    const matchedFileNames = expected.filter(name => bodyText.toLowerCase().includes(name));
+    const inputMatchedFileNames = expected.filter(name => fileInputs.some(item => String(item.value || '').toLowerCase().includes(name)));
+    const attachmentHints = Array.from(document.querySelectorAll('button, div, span, a'))
+      .filter(isVisible)
+      .map(node => normalize(node.innerText || ''))
+      .filter(text => {
+        if (!text) return false;
+        const lower = text.toLowerCase();
+        if (expected.some(name => lower.includes(name))) return true;
+        return /upload from computer|upload files?|add photos? & files|attachments?|uploaded|uploading|remove|drag and drop|附件|上传|已上传|文件|图片|照片/i.test(lower);
+      })
+      .slice(0, 40);
+
+    const previewImageCount = Array.from(document.querySelectorAll('img'))
+      .filter(node => isVisible(node))
+      .filter(node => {
+        const src = String(node.currentSrc || node.getAttribute('src') || '');
+        return src.startsWith('blob:') || src.startsWith('data:image/');
+      })
+      .length;
+
+    const removeButtonCount = Array.from(document.querySelectorAll('button'))
+      .filter(isVisible)
+      .filter(node => {
+        const label = normalize(node.getAttribute('aria-label') || node.innerText || '').toLowerCase();
+        return /remove|delete|移除|删除/.test(label);
+      })
+      .length;
+
+    return {
+      actionCandidates,
+      fileInputs,
+      matchedFileNames,
+      inputMatchedFileNames,
+      attachmentHints,
+      previewImageCount,
+      removeButtonCount,
+      bodyPreview: bodyText.slice(0, 500)
+    };
+  }, expectedFileNames).catch(() => ({
+    actionCandidates: [],
+    fileInputs: [],
+    matchedFileNames: [],
+    inputMatchedFileNames: [],
+    attachmentHints: [],
+    previewImageCount: 0,
+    removeButtonCount: 0,
+    bodyPreview: ''
+  }));
+}
+
+async function captureDebugState(name, options = {}) {
+  try {
+    return await api.capture(name, {
+      screenshot: options.screenshot !== false,
+      text: options.text !== false,
+      html: !!options.html,
+      fullPage: !!options.fullPage
+    });
+  } catch (e) {
+    log('capture failed', {
+      name,
+      error: e && e.message ? e.message : String(e || '')
+    });
+    return null;
   }
-  if (!tempPaths.length) return 0;
-  const selectors = [
-    'button[aria-label*="Attach"]',
-    'button[aria-label*="attach"]',
-    'button[aria-label*="上传"]',
-    '[data-testid*="attach"] button'
-  ];
-  let triggered = false;
-  for (const sel of selectors) {
-    const btn = page.locator(sel).first();
-    if (await btn.count().catch(() => 0) > 0) {
-      try {
-        const fcP = page.waitForEvent("filechooser", { timeout: 8000 });
-        await btn.click({ timeout: 4000 }).catch(() => null);
-        const fc = await fcP;
-        await fc.setFiles(tempPaths);
-        triggered = true;
-        await page.waitForTimeout(1200).catch(() => null);
-        break;
-      } catch (e) {}
+}
+
+async function buildAttachmentPayloads(attachments) {
+  const payloads = [];
+  const resolved = [];
+  const errors = [];
+
+  for (const att of attachments || []) {
+    try {
+      const saved = await helpers.files.resolve(att, { prefix: 'attach' });
+      const fileObject = await helpers.files.fromPath(saved.path, {
+        fileName: saved.fileName,
+        mimeType: saved.mimeType
+      });
+      if (!fileObject || typeof fileObject.base64 !== 'string') {
+        throw new Error('helpers.files.fromPath did not return base64 payload');
+      }
+      payloads.push({
+        name: saved.fileName,
+        mimeType: saved.mimeType || fileObject.mimeType || 'application/octet-stream',
+        buffer: Buffer.from(fileObject.base64, 'base64')
+      });
+      resolved.push({
+        path: saved.path,
+        fileName: saved.fileName,
+        mimeType: saved.mimeType || fileObject.mimeType || 'application/octet-stream'
+      });
+    } catch (e) {
+      errors.push(e && e.message ? e.message : String(e || 'resolve failed'));
     }
   }
-  return tempPaths.length;
+
+  return { payloads, resolved, errors };
+}
+
+function normalizeAttachmentMimeType(mimeType) {
+  return String(mimeType || '').split(';')[0].trim().toLowerCase();
+}
+
+function attachmentExtension(fileName) {
+  const name = String(fileName || '').trim().toLowerCase();
+  const index = name.lastIndexOf('.');
+  return index >= 0 ? name.slice(index) : '';
+}
+
+function acceptTokenMatchesFile(token, filePayload) {
+  const normalizedToken = String(token || '').trim().toLowerCase();
+  if (!normalizedToken || normalizedToken === '*/*') return true;
+
+  const mimeType = normalizeAttachmentMimeType(filePayload && filePayload.mimeType);
+  const ext = attachmentExtension(filePayload && filePayload.name);
+
+  if (normalizedToken.startsWith('.')) {
+    return normalizedToken === ext;
+  }
+  if (normalizedToken.endsWith('/*')) {
+    return mimeType.startsWith(normalizedToken.slice(0, -1));
+  }
+  return mimeType === normalizedToken;
+}
+
+function scoreFileInputAccept(accept, filePayloads) {
+  const tokens = String(accept || '')
+    .split(',')
+    .map(item => item.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (!tokens.length) return 70;
+
+  let score = 0;
+  for (const filePayload of filePayloads || []) {
+    let matched = false;
+    for (const token of tokens) {
+      if (!acceptTokenMatchesFile(token, filePayload)) continue;
+      matched = true;
+      if (token === '*/*') score += 60;
+      else if (token.endsWith('/*')) score += 80;
+      else score += 100;
+      break;
+    }
+    if (!matched) return -1;
+  }
+
+  return score;
+}
+
+async function trySetFilesOnExistingInput(filePayloads) {
+  const fileInputs = page.locator('input[type="file"]');
+  const count = await fileInputs.count().catch(() => 0);
+  const inputState = await inspectAttachmentUi((filePayloads || []).map(item => item.name || ''));
+  const candidates = (inputState.fileInputs || [])
+    .map(item => ({
+      ...item,
+      score: scoreFileInputAccept(item.accept, filePayloads),
+      visibilityScore: item.visible ? 1 : 0
+    }))
+    .filter(item => item.index >= 0 && item.index < count)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.visibilityScore !== a.visibilityScore) return b.visibilityScore - a.visibilityScore;
+      return a.index - b.index;
+    });
+  let lastError = null;
+
+  for (const candidate of candidates) {
+    if (candidate.score < 0) continue;
+    try {
+      await fileInputs.nth(candidate.index).setInputFiles(filePayloads, { timeout: 8000 });
+      return {
+        ok: true,
+        strategy: 'input',
+        index: candidate.index,
+        count,
+        accept: candidate.accept,
+        visible: candidate.visible,
+        score: candidate.score
+      };
+    } catch (e) {
+      lastError = e && e.message ? e.message : String(e || 'setInputFiles failed');
+    }
+  }
+
+  return {
+    ok: false,
+    strategy: 'input',
+    count,
+    error: lastError,
+    candidates
+  };
+}
+
+async function tryUploadMenuAction(filePayloads) {
+  const candidates = [
+    { label: 'menuitem:upload-from-computer', locator: page.getByRole('menuitem', { name: /upload from computer/i }).first() },
+    { label: 'button:upload-from-computer', locator: page.getByRole('button', { name: /upload from computer/i }).first() },
+    { label: 'text:upload-from-computer', locator: page.getByText(/upload from computer/i).first() },
+    { label: 'menuitem:upload-files', locator: page.getByRole('menuitem', { name: /upload files?/i }).first() },
+    { label: 'button:upload-files', locator: page.getByRole('button', { name: /upload files?/i }).first() },
+    { label: 'text:upload-files', locator: page.getByText(/upload files?|add photos? & files|upload photos?/i).first() },
+    { label: 'text:upload-cn', locator: page.getByText(/从电脑上传|上传文件|上传图片|添加照片和文件/i).first() }
+  ];
+
+  for (const candidate of candidates) {
+    const count = await candidate.locator.count().catch(() => 0);
+    if (count <= 0) continue;
+    try {
+      const chooserPromise = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
+      await candidate.locator.click({ timeout: 5000 }).catch(() => null);
+      const chooser = await chooserPromise;
+      if (chooser) {
+        await chooser.setFiles(filePayloads);
+        return { ok: true, strategy: 'filechooser', label: candidate.label };
+      }
+
+      const inputResult = await trySetFilesOnExistingInput(filePayloads);
+      if (inputResult.ok) {
+        return {
+          ok: true,
+          strategy: 'menu-then-input',
+          label: candidate.label,
+          inputIndex: inputResult.index,
+          inputCount: inputResult.count
+        };
+      }
+    } catch (e) {
+      log('menu upload candidate failed', {
+        label: candidate.label,
+        error: e && e.message ? e.message : String(e || '')
+      });
+    }
+  }
+
+  return { ok: false, strategy: 'menu', error: 'no upload menu action succeeded' };
+}
+
+async function waitForAttachmentConfirmation(expectedFileNames, baselineState, maxMs = 20000) {
+  const start = Date.now();
+  let lastSignature = '';
+
+  while (Date.now() - start < maxMs) {
+    const state = await inspectAttachmentUi(expectedFileNames);
+    const signature = JSON.stringify({
+      matchedFileNames: state.matchedFileNames,
+      inputMatchedFileNames: state.inputMatchedFileNames,
+      attachmentHints: state.attachmentHints.slice(0, 8),
+      previewImageCount: state.previewImageCount,
+      removeButtonCount: state.removeButtonCount,
+      fileInputs: state.fileInputs.map(item => ({ index: item.index, value: item.value }))
+    });
+
+    if (signature !== lastSignature) {
+      lastSignature = signature;
+      log('attachment ui state', state);
+    }
+
+    const allInText = expectedFileNames.length > 0 && state.matchedFileNames.length >= expectedFileNames.length;
+    const allInInputs = expectedFileNames.length > 0 && state.inputMatchedFileNames.length >= expectedFileNames.length;
+    const hintedText = state.attachmentHints.join(' || ').toLowerCase();
+    const allInHints = expectedFileNames.length > 0 && expectedFileNames.every(name => hintedText.includes(String(name).toLowerCase()));
+    const previewIncreased = state.previewImageCount > (baselineState && baselineState.previewImageCount || 0);
+    const removeButtonsIncreased = state.removeButtonCount > (baselineState && baselineState.removeButtonCount || 0);
+
+    if (allInText || allInInputs || allInHints || previewIncreased || removeButtonsIncreased) {
+      return { ok: true, state };
+    }
+
+    await page.waitForTimeout(500).catch(() => null);
+  }
+
+  return { ok: false, state: await inspectAttachmentUi(expectedFileNames) };
+}
+
+async function waitForAttachmentTransferReady(expectedFileNames, baselineState, maxMs = 30000) {
+  const start = Date.now();
+  let lastSignature = '';
+
+  while (Date.now() - start < maxMs) {
+    const confirmation = await waitForAttachmentConfirmation(expectedFileNames, baselineState, 500).catch(() => ({ ok: false, state: null }));
+    const sendState = await sampleSendState();
+    const networkState = snapshotUploadNetwork();
+    const idleMs = networkState.lastEventAt ? (Date.now() - networkState.lastEventAt) : (Date.now() - start);
+    const sendReady = sendState.sendButton
+      ? sendState.sendButton.visible && !sendState.sendButton.disabled
+      : !!sendState.composerText;
+    const networkSettled = networkState.pending.length === 0 && idleMs >= 1500;
+
+    const signature = JSON.stringify({
+      confirmationOk: confirmation.ok,
+      matchedFileNames: confirmation.state && confirmation.state.matchedFileNames || [],
+      pending: networkState.pending.map(item => ({ id: item.id, method: item.method, url: item.url, status: item.status || null })),
+      totalEvents: networkState.totalEvents,
+      idleMs,
+      sendReady,
+      sendButton: sendState.sendButton
+    });
+
+    if (signature !== lastSignature) {
+      lastSignature = signature;
+      log('attachment transfer state', {
+        confirmation,
+        sendState,
+        networkState,
+        idleMs,
+        sendReady,
+        networkSettled
+      });
+    }
+
+    if (confirmation.ok && networkSettled && sendReady) {
+      return {
+        ok: true,
+        confirmation,
+        sendState,
+        networkState,
+        idleMs,
+        sendReady,
+        networkSettled
+      };
+    }
+
+    await page.waitForTimeout(500).catch(() => null);
+  }
+
+  const confirmation = await waitForAttachmentConfirmation(expectedFileNames, baselineState, 500).catch(() => ({ ok: false, state: null }));
+  const sendState = await sampleSendState();
+  const networkState = snapshotUploadNetwork();
+  const idleMs = networkState.lastEventAt ? (Date.now() - networkState.lastEventAt) : (Date.now() - start);
+  const sendReady = sendState.sendButton
+    ? sendState.sendButton.visible && !sendState.sendButton.disabled
+    : !!sendState.composerText;
+
+  return {
+    ok: false,
+    confirmation,
+    sendState,
+    networkState,
+    idleMs,
+    sendReady,
+    networkSettled: networkState.pending.length === 0 && idleMs >= 1500
+  };
+}
+
+async function uploadAttachments(attachments) {
+  if (!attachments || !attachments.length) {
+    return {
+      requested: 0,
+      resolved: 0,
+      expectedFileNames: [],
+      confirmed: true,
+      action: null,
+      errors: []
+    };
+  }
+
+  const payloadResult = await buildAttachmentPayloads(attachments);
+  const expectedFileNames = payloadResult.resolved.map(item => item.fileName).filter(Boolean);
+  await api.step('attachments:start', {
+    requested: attachments.length,
+    resolved: payloadResult.resolved.length,
+    expectedFileNames,
+    resolveErrors: payloadResult.errors
+  }).catch(() => null);
+
+  log('attachments resolved', {
+    resolved: payloadResult.resolved,
+    errors: payloadResult.errors
+  });
+
+  if (!payloadResult.payloads.length) {
+    throw new Error('ATTACHMENTS_RESOLVE_FAILED:' + JSON.stringify({
+      requested: attachments.length,
+      errors: payloadResult.errors
+    }));
+  }
+
+  const baselineState = await inspectAttachmentUi(expectedFileNames);
+  log('attachment ui before upload', baselineState);
+  await captureDebugState('attachments-before', { screenshot: true, text: true, fullPage: false });
+
+  resetUploadNetworkTracking();
+  uploadNetwork.active = true;
+  uploadNetwork.startedAt = Date.now();
+
+  let action = { ok: false, attempt: null, errors: [] };
+  let transferReady = null;
+  try {
+    action = await trySetFilesOnExistingInput(payloadResult.payloads);
+    if (!action.ok) {
+      const selectors = [
+        'button[aria-label*="Attach"]',
+        'button[aria-label*="attach"]',
+        'button[aria-label*="上传"]',
+        'button[data-testid*="attach"]',
+        '[data-testid*="attach"] button',
+        'button[aria-label*="Add photos"]',
+        'button[aria-label*="files"]'
+      ];
+
+      for (let index = 0; index < selectors.length; index += 1) {
+        const selector = selectors[index];
+        const button = page.locator(selector).first();
+        const count = await button.count().catch(() => 0);
+        if (count <= 0) continue;
+        try {
+          log('attachment button candidate', { selector, index });
+          await button.click({ timeout: 5000 }).catch(() => null);
+          await page.waitForTimeout(400).catch(() => null);
+          await captureDebugState('attachments-open-' + index, { screenshot: true, text: true, fullPage: false });
+
+          action = await trySetFilesOnExistingInput(payloadResult.payloads);
+          if (action.ok) {
+            action.openedBy = selector;
+            break;
+          }
+
+          const menuAction = await tryUploadMenuAction(payloadResult.payloads);
+          if (menuAction.ok) {
+            action = {
+              ...menuAction,
+              openedBy: selector
+            };
+            break;
+          }
+        } catch (e) {
+          log('attachment button click failed', {
+            selector,
+            error: e && e.message ? e.message : String(e || '')
+          });
+        }
+      }
+    }
+
+    log('attachment action result', action);
+    transferReady = await waitForAttachmentTransferReady(expectedFileNames, baselineState, 30000);
+    log('attachment transfer ready result', transferReady);
+    log('attachment network summary', snapshotUploadNetwork());
+  } finally {
+    uploadNetwork.active = false;
+  }
+
+  await captureDebugState('attachments-after', { screenshot: true, text: true, fullPage: false });
+
+  if (!action.ok || !transferReady || !transferReady.ok) {
+    throw new Error('ATTACHMENTS_NOT_CONFIRMED:' + JSON.stringify({
+      action,
+      expectedFileNames,
+      resolved: payloadResult.resolved,
+      resolveErrors: payloadResult.errors,
+      baselineState,
+      transferReady,
+      networkState: snapshotUploadNetwork()
+    }));
+  }
+
+  await api.step('attachments:confirmed', {
+    expectedFileNames,
+    action,
+    transferReady
+  }).catch(() => null);
+
+  return {
+    requested: attachments.length,
+    resolved: payloadResult.resolved.length,
+    expectedFileNames,
+    confirmed: true,
+    action,
+    transferReady,
+    errors: payloadResult.errors
+  };
 }
 
 async function resolvePointers(pointers, conversationId) {
@@ -457,6 +978,92 @@ async function sampleNewAssistantText(baselineIds) {
     }
     return texts.join('\\n\\n');
   }, baselineIds).catch(() => '');
+}
+
+async function sampleSendState() {
+  return await page.evaluate(() => {
+    const normalize = text => String(text || '').replace(/\\s+/g, ' ').trim();
+    const isVisible = node => !!(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+    const composer = document.querySelector('.ProseMirror');
+    const sendButton = document.querySelector('button[data-testid="send-button"]');
+    const stop = document.querySelector('[aria-label="Stop answering"], [aria-label="Stop generating"], button[aria-label="Stop answering"], button[aria-label="Stop generating"]');
+
+    return {
+      composerText: composer ? normalize(composer.innerText || '') : '',
+      sendButton: sendButton ? {
+        visible: isVisible(sendButton),
+        disabled: !!sendButton.disabled || sendButton.getAttribute('aria-disabled') === 'true',
+        aria: String(sendButton.getAttribute('aria-label') || ''),
+        title: String(sendButton.getAttribute('title') || ''),
+        text: normalize(sendButton.innerText || '')
+      } : null,
+      stopVisible: stop ? isVisible(stop) : false,
+      bodyPreview: normalize(document.body.innerText || '').slice(0, 400)
+    };
+  }).catch(() => ({
+    composerText: '',
+    sendButton: null,
+    stopVisible: false,
+    bodyPreview: ''
+  }));
+}
+
+async function waitForSendReady(maxMs = 15000) {
+  const start = Date.now();
+  let lastSignature = '';
+
+  while (Date.now() - start < maxMs) {
+    const state = await sampleSendState();
+    const signature = JSON.stringify({
+      composerText: state.composerText.slice(0, 80),
+      sendButton: state.sendButton,
+      stopVisible: state.stopVisible
+    });
+
+    if (signature !== lastSignature) {
+      lastSignature = signature;
+      log('send ui state', state);
+    }
+
+    if (state.sendButton && state.sendButton.visible && !state.sendButton.disabled) {
+      return { ok: true, state };
+    }
+    if (!state.sendButton && state.composerText) {
+      return { ok: true, state };
+    }
+
+    await page.waitForTimeout(500).catch(() => null);
+  }
+
+  return { ok: false, state: await sampleSendState() };
+}
+
+async function triggerSendAction(preferClick = false) {
+  const composer = page.locator('.ProseMirror').first();
+  const sendButton = page.locator('button[data-testid="send-button"]').first();
+  const attempts = preferClick
+    ? ['click-send-button', 'press-enter']
+    : ['press-enter', 'click-send-button'];
+  const errors = [];
+
+  for (const attempt of attempts) {
+    try {
+      if (attempt === 'press-enter') {
+        await composer.click({ timeout: 5000 }).catch(() => null);
+        await composer.press('Enter', { timeout: 5000 });
+      } else {
+        await sendButton.click({ timeout: 5000 });
+      }
+      log('send action attempted', { attempt });
+      return { ok: true, attempt, errors };
+    } catch (e) {
+      const error = e && e.message ? e.message : String(e || 'send failed');
+      errors.push({ attempt, error });
+      log('send action failed', { attempt, error });
+    }
+  }
+
+  return { ok: false, attempt: null, errors };
 }
 
 async function dismissAnyDialog() {
@@ -721,7 +1328,108 @@ const onWebSocket = ws => {
   wsHandlers.set(ws, onFrameReceived);
 };
 
+const onRequest = request => {
+  try {
+    if (!uploadNetwork.active || !isAttachmentTransferRequest(request)) return;
+    const id = 'upload-' + (++uploadNetwork.seq);
+    uploadRequestIds.set(request, id);
+    const entry = {
+      id,
+      phase: 'request',
+      ts: Date.now() - t0,
+      method: request.method(),
+      resourceType: request.resourceType(),
+      url: request.url()
+    };
+    uploadNetwork.pending.set(id, entry);
+    recordUploadNetworkEvent(entry);
+  } catch (e) {
+    log('upload request tracker failed', {
+      error: e && e.message ? e.message : String(e || '')
+    });
+  }
+};
+
+const onResponse = response => {
+  try {
+    if (!uploadNetwork.active) return;
+    const request = response.request();
+    const id = uploadRequestIds.get(request);
+    if (!id) return;
+    const pendingEntry = uploadNetwork.pending.get(id) || {};
+    const entry = {
+      id,
+      phase: 'response',
+      ts: Date.now() - t0,
+      method: request.method(),
+      status: response.status(),
+      resourceType: request.resourceType(),
+      url: response.url(),
+      contentType: response.headers()['content-type'] || ''
+    };
+    uploadNetwork.pending.set(id, {
+      ...pendingEntry,
+      status: response.status(),
+      contentType: response.headers()['content-type'] || ''
+    });
+    recordUploadNetworkEvent(entry);
+  } catch (e) {
+    log('upload response tracker failed', {
+      error: e && e.message ? e.message : String(e || '')
+    });
+  }
+};
+
+const onRequestFinished = request => {
+  try {
+    if (!uploadNetwork.active) return;
+    const id = uploadRequestIds.get(request);
+    if (!id) return;
+    const pendingEntry = uploadNetwork.pending.get(id) || {};
+    uploadNetwork.pending.delete(id);
+    recordUploadNetworkEvent({
+      id,
+      phase: 'finished',
+      ts: Date.now() - t0,
+      method: request.method(),
+      resourceType: request.resourceType(),
+      url: request.url(),
+      status: pendingEntry.status || null
+    });
+  } catch (e) {
+    log('upload requestfinished tracker failed', {
+      error: e && e.message ? e.message : String(e || '')
+    });
+  }
+};
+
+const onRequestFailed = request => {
+  try {
+    if (!uploadNetwork.active) return;
+    const id = uploadRequestIds.get(request);
+    if (!id) return;
+    uploadNetwork.pending.delete(id);
+    recordUploadNetworkEvent({
+      id,
+      phase: 'failed',
+      ts: Date.now() - t0,
+      method: request.method(),
+      resourceType: request.resourceType(),
+      url: request.url(),
+      failure: request.failure() && request.failure().errorText || ''
+    });
+  } catch (e) {
+    log('upload requestfailed tracker failed', {
+      error: e && e.message ? e.message : String(e || '')
+    });
+  }
+};
+
 page.on('websocket', onWebSocket);
+page.on('request', onRequest);
+page.on('response', onResponse);
+page.on('requestfinished', onRequestFinished);
+page.on('requestfailed', onRequestFailed);
 
 try {
   const requestedSid = String(input.sessionId || '').trim();
@@ -788,20 +1496,26 @@ try {
 
   if (input.attachments && input.attachments.length) {
     const attached = await uploadAttachments(input.attachments);
-    log("attachments processed", { count: attached });
+    log('attachments processed', attached);
   }
 
+  const sendReady = await waitForSendReady(input.attachments && input.attachments.length ? 20000 : 12000);
+  log('send ready result', sendReady);
+  await captureDebugState('before-send', { screenshot: true, text: true, fullPage: false });
+
   progress.sendStartedAt = Date.now() - t0;
-  const sendBtn = page.locator('button[data-testid="send-button"]');
-  try {
-    await composer.press('Enter', { timeout: 5000 });
-  } catch {
-    await sendBtn.click({ timeout: 8000 });
+  const primarySend = await triggerSendAction(!!(input.attachments && input.attachments.length));
+  if (!primarySend.ok) {
+    throw new Error('SEND_ACTION_FAILED:' + JSON.stringify({
+      sendReady,
+      primarySend
+    }));
   }
   await dismissAnyDialog();
 
   const sendConfirmStart = Date.now();
   let userMessageSent = false;
+  let retryTriggered = false;
   const promptNeedle = normalizeText(String(input.prompt || '')).slice(0, 80);
   while (Date.now() - sendConfirmStart < 5000) {
     const currentUserMessages = await snapshotVisibleMessages('user');
@@ -816,6 +1530,16 @@ try {
       userMessageSent = true;
       break;
     }
+
+    if (!retryTriggered && Date.now() - sendConfirmStart > 2500) {
+      const sendState = await sampleSendState();
+      log('send confirm retry state', sendState);
+      await captureDebugState('send-retry', { screenshot: true, text: true, fullPage: false });
+      const retrySend = await triggerSendAction(true);
+      log('send retry result', retrySend);
+      retryTriggered = true;
+    }
+
     const ui = await sampleUiState();
     if (ui.dialogs.length > 0) {
       await dismissAnyDialog();
@@ -1019,6 +1743,10 @@ try {
 } finally {
   if (typeof page.off === 'function') {
     page.off('websocket', onWebSocket);
+    page.off('request', onRequest);
+    page.off('response', onResponse);
+    page.off('requestfinished', onRequestFinished);
+    page.off('requestfailed', onRequestFailed);
   }
   for (const [ws, handler] of wsHandlers.entries()) {
     if (typeof ws.off === 'function') {

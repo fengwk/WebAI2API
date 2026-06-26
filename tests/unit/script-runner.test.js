@@ -11,8 +11,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import EventEmitter from 'node:events';
 
-import { compileScriptRunner } from '../../src/backend/pool/Worker.js';
+import { compileScriptRunner, createSafeScriptObject } from '../../src/backend/pool/Worker.js';
 
 function fakePage({ url = 'https://example.com', title = 'Example' } = {}) {
     return {
@@ -87,4 +88,27 @@ test('script can call api.log and api.step', async () => {
     assert.deepEqual(result, { ok: true });
     assert.deepEqual(logs, [{ level: 'info', message: 'hello' }]);
     assert.deepEqual(steps, ['open']);
+});
+
+test('createSafeScriptObject catches event-listener exceptions', async () => {
+    const emitter = new EventEmitter();
+    const captured = [];
+    const safeEmitter = createSafeScriptObject(emitter, {
+        label: 'emitter',
+        onAsyncError: (error, context) => captured.push({ message: error.message, context })
+    });
+
+    safeEmitter.on('tick', () => {
+        throw new Error('boom');
+    });
+
+    emitter.emit('tick');
+
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].message, 'boom');
+    assert.deepEqual(captured[0].context, {
+        label: 'emitter',
+        method: 'on',
+        eventName: 'tick'
+    });
 });

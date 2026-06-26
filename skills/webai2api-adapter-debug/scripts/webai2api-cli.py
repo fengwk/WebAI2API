@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
 import subprocess
 import sys
@@ -276,10 +277,11 @@ def build_upload_payload(paths: list[str]) -> tuple[bytes, str]:
         file_path = Path(raw_path).expanduser().resolve()
         if not file_path.is_file():
             raise SystemExit(f"附件文件不存在: {file_path}")
+        guessed_content_type = mimetypes.guess_type(file_path.name)[0] or 'application/octet-stream'
         parts.append(f"--{boundary}\r\n".encode('utf-8'))
         disposition = f'Content-Disposition: form-data; name="attachments"; filename="{file_path.name}"\r\n'
         parts.append(disposition.encode('utf-8'))
-        parts.append(b'Content-Type: application/octet-stream\r\n\r\n')
+        parts.append(f'Content-Type: {guessed_content_type}\r\n\r\n'.encode('utf-8'))
         parts.append(file_path.read_bytes())
         parts.append(b"\r\n")
 

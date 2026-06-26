@@ -179,6 +179,122 @@ function createExecutionHelpers(context = {}) {
     };
 }
 
+function createAsyncCallbackError(error, context = {}) {
+    const normalized = normalizeExecutionError(error);
+    const wrapped = new Error(normalized.message || '脚本异步回调执行失败');
+    wrapped.code = normalized.code || 'SCRIPT_ASYNC_CALLBACK_ERROR';
+    wrapped.retryable = false;
+    wrapped.details = {
+        ...(normalized.details && typeof normalized.details === 'object' ? normalized.details : {}),
+        asyncContext: context
+    };
+    return wrapped;
+}
+
+function createSafeScriptObject(rootValue, options = {}) {
+    const { onAsyncError = () => { }, label = 'script' } = options;
+    const proxyCache = new WeakMap();
+    const listenerCache = new WeakMap();
+
+    function rememberWrappedListener(target, eventName, originalHandler, wrappedHandler) {
+        let targetMap = listenerCache.get(target);
+        if (!targetMap) {
+            targetMap = new WeakMap();
+            listenerCache.set(target, targetMap);
+        }
+
+        let handlerMap = targetMap.get(originalHandler);
+        if (!handlerMap) {
+            handlerMap = new Map();
+            targetMap.set(originalHandler, handlerMap);
+        }
+
+        handlerMap.set(String(eventName), wrappedHandler);
+    }
+
+    function resolveWrappedListener(target, eventName, originalHandler) {
+        const targetMap = listenerCache.get(target);
+        if (!targetMap) return originalHandler;
+        const handlerMap = targetMap.get(originalHandler);
+        if (!handlerMap) return originalHandler;
+        return handlerMap.get(String(eventName)) || originalHandler;
+    }
+
+    function wrapReturnValue(value, valueLabel) {
+        if (value && typeof value.then === 'function') {
+            return value.then(inner => wrapValue(inner, valueLabel));
+        }
+        return wrapValue(value, valueLabel);
+    }
+
+    function wrapValue(value, valueLabel = label) {
+        if (!value || (typeof value !== 'object' && typeof value !== 'function')) {
+            return value;
+        }
+        if (proxyCache.has(value)) {
+            return proxyCache.get(value);
+        }
+
+        const proxy = new Proxy(value, {
+            get(target, prop) {
+                const current = Reflect.get(target, prop, target);
+
+                if (
+                    typeof prop === 'string'
+                    && ['on', 'once', 'addListener', 'prependListener'].includes(prop)
+                    && typeof current === 'function'
+                ) {
+                    return (eventName, handler, ...rest) => {
+                        if (typeof handler !== 'function') {
+                            return wrapReturnValue(current.call(target, eventName, handler, ...rest), `${valueLabel}.${prop}`);
+                        }
+
+                        const wrappedHandler = (...args) => {
+                            try {
+                                return handler(...args.map(arg => wrapValue(arg, `${valueLabel}:${String(eventName)}`)));
+                            } catch (error) {
+                                onAsyncError(error, {
+                                    label: valueLabel,
+                                    method: prop,
+                                    eventName: String(eventName)
+                                });
+                                return undefined;
+                            }
+                        };
+
+                        rememberWrappedListener(target, eventName, handler, wrappedHandler);
+                        return wrapReturnValue(current.call(target, eventName, wrappedHandler, ...rest), `${valueLabel}.${prop}`);
+                    };
+                }
+
+                if (
+                    typeof prop === 'string'
+                    && ['off', 'removeListener'].includes(prop)
+                    && typeof current === 'function'
+                ) {
+                    return (eventName, handler, ...rest) => {
+                        const actualHandler = typeof handler === 'function'
+                            ? resolveWrappedListener(target, eventName, handler)
+                            : handler;
+                        return wrapReturnValue(current.call(target, eventName, actualHandler, ...rest), `${valueLabel}.${prop}`);
+                    };
+                }
+
+                if (typeof current === 'function') {
+                    return (...args) => wrapReturnValue(current.apply(target, args), `${valueLabel}.${String(prop)}`);
+                }
+
+                return wrapValue(current, `${valueLabel}.${String(prop)}`);
+            }
+        });
+
+        proxyCache.set(value, proxy);
+        return proxy;
+    }
+
+    return wrapValue(rootValue, label);
+}
+
 /**
  * 创建脚本内可见的 `api` 注入对象。
  * - 始终只对外返回 URL（fileOutput.rootDir/urlBasePath 启用时）
@@ -283,7 +399,7 @@ function createAdapterApi(workerName, instanceName, fileOutput, page, trace = nu
 // ============================================================
 
 // 暴露给测试的内部工具
-export { compileScriptRunner, normalizeExecutionError, createAdapterApi, createExecutionHelpers };
+export { compileScriptRunner, normalizeExecutionError, createAdapterApi, createExecutionHelpers, createSafeScriptObject, createAsyncCallbackError };
 
 export class Worker {
     /**
@@ -721,6 +837,30 @@ export class Worker {
             worker: { name: this.name, type: this.type, instance: this.instanceName },
             meta: { ...meta, debug: !!task.debug, requestId: meta?.id || null }
         };
+        const asyncScriptErrorState = { error: null };
+        const handleAsyncScriptError = (error, context = {}) => {
+            const wrapped = createAsyncCallbackError(error, context);
+            if (!asyncScriptErrorState.error) {
+                asyncScriptErrorState.error = wrapped;
+            }
+
+            const logExtra = {
+                code: wrapped.code,
+                error: wrapped.message,
+                ...context
+            };
+            trace.logs.push({
+                ts: Date.now(),
+                level: 'error',
+                message: '脚本异步回调异常',
+                extra: logExtra
+            });
+            logger.error('动态适配器', `[${this.name}${this.instanceName ? `@${this.instanceName}` : ''}] 脚本异步回调异常`, logExtra);
+        };
+        const safePageRef = createSafeScriptObject(pageRef, {
+            label: 'page',
+            onAsyncError: handleAsyncScriptError
+        });
         const scriptCtx = {
             page: pageRef,
             context: this.browser,
@@ -735,7 +875,10 @@ export class Worker {
 
         // 5) 执行脚本（按新协议注入：page, input, api, helpers, runtime）
         try {
-            const result = await runner(pageRef, task.input, api, helpers, runtime);
+            const result = await runner(safePageRef, task.input, api, helpers, runtime);
+            if (asyncScriptErrorState.error) {
+                throw asyncScriptErrorState.error;
+            }
             return {
                 success: true,
                 data: result === undefined ? null : result,
