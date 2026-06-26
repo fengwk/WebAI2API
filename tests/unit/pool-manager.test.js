@@ -140,3 +140,24 @@ test('PoolManager returns WORKER_UNAVAILABLE when supporting workers are unhealt
     assert.equal(result.success, false);
     assert.equal(result.error.code, 'WORKER_UNAVAILABLE');
 });
+
+test('PoolManager.dispose 会调用所有 worker.dispose 并清空 workers', async () => {
+    const manager = new PoolManager({
+        backend: { pool: { strategy: 'least_busy', failover: { enabled: false, maxRetries: 0 } } }
+    });
+    const disposed = [];
+    manager.initialized = true;
+    manager.workers = [
+        { name: 'first', async dispose(reason) { disposed.push(['first', reason]); } },
+        { name: 'second', async dispose(reason) { disposed.push(['second', reason]); } }
+    ];
+
+    await manager.dispose('fatal-runtime');
+
+    assert.equal(manager.initialized, false);
+    assert.deepEqual(manager.workers, []);
+    assert.deepEqual(disposed, [
+        ['first', 'fatal-runtime'],
+        ['second', 'fatal-runtime']
+    ]);
+});

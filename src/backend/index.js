@@ -54,6 +54,12 @@ export function getBackend() {
             }
             return await poolManager.getCookies(workerName, domain);
         },
+        resetPool: async (reason = 'pool reset') => {
+            if (poolManager) {
+                await poolManager.dispose(reason);
+                poolManager = null;
+            }
+        },
         getPoolManager: () => poolManager
     };
 }

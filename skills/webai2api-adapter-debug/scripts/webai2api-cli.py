@@ -8,6 +8,7 @@ Authorization: Bearer ${TOOLS_API_KEY}。
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import mimetypes
 import os
@@ -63,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id", help="写入 input.sessionId")
     parser.add_argument("--worker-id", help="指定 sticky workerId")
     parser.add_argument("--debug", action="store_true", help="发送 debug=true，请求返回 trace")
-    parser.add_argument("--http-timeout", type=float, default=240.0, help="HTTP 超时秒数，默认 240")
+    parser.add_argument("--http-timeout", type=float, default=420.0, help="HTTP 超时秒数，默认 420")
     parser.add_argument("--pretty", action="store_true", help="若响应为 JSON，则格式化后输出")
     parser.add_argument("--save-response", help="把原始响应 body 保存到文件")
     parser.add_argument(
@@ -304,9 +305,9 @@ def upload_attachments(paths: list[str], token: str, timeout: float) -> list[dic
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode('utf-8')
+            raw = read_http_body(resp)
     except urllib.error.HTTPError as exc:
-        raise SystemExit(f"上传附件失败: HTTP {exc.code}\n{exc.read().decode('utf-8')}") from exc
+        raise SystemExit(f"上传附件失败: HTTP {exc.code}\n{read_http_body(exc)}") from exc
     except urllib.error.URLError as exc:
         raise SystemExit(f"上传附件失败: {exc}") from exc
 
@@ -325,6 +326,14 @@ def save_response(path: str, raw_text: str) -> None:
     target = Path(path).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(raw_text, encoding="utf-8")
+
+
+def read_http_body(response: Any) -> str:
+    try:
+        payload = response.read()
+    except http.client.IncompleteRead as exc:
+        payload = exc.partial
+    return payload.decode("utf-8", errors="replace")
 
 
 def send_request(adapter_id: str, args: argparse.Namespace, body: dict[str, Any]) -> tuple[int, str]:
@@ -346,9 +355,9 @@ def send_request(adapter_id: str, args: argparse.Namespace, body: dict[str, Any]
     )
     try:
         with urllib.request.urlopen(req, timeout=args.http_timeout) as resp:
-            return int(resp.status), resp.read().decode("utf-8")
+            return int(resp.status), read_http_body(resp)
     except urllib.error.HTTPError as exc:
-        return int(exc.code), exc.read().decode("utf-8")
+        return int(exc.code), read_http_body(exc)
     except TimeoutError as exc:
         raise SystemExit(f"请求超时（>{args.http_timeout}s）: {exc}") from exc
     except urllib.error.URLError as exc:

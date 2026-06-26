@@ -430,6 +430,7 @@ export class Worker {
         this._isBrowserOwner = false;
         this._browserOwner = null;
         this._sharedWorkers = [];
+        this._disposing = false;
     }
 
     /**
@@ -544,6 +545,7 @@ export class Worker {
     _registerPageCloseHandler() {
         if (!this.page) return;
         this.page.on('close', async () => {
+            if (this._disposing) return;
             if (this.browser && !this.browser.isClosed?.()) {
                 logger.warn('工作池', `[${this.name}] 标签页已关闭，正在重新创建...`);
                 this.initialized = false;
@@ -597,6 +599,7 @@ export class Worker {
             });
         } else {
             this.browser.on('close', async () => {
+                if (this._disposing) return;
                 logger.warn('工作池', `[${this.name}] 浏览器已断开连接，正在自动重新初始化...`);
                 this.initialized = false;
                 this.browser = null;
@@ -647,6 +650,63 @@ export class Worker {
         await this._initNewBrowser();
         this.initialized = true;
         logger.info('工作池', `[${this.name}] 浏览器已成功重新初始化`);
+    }
+
+    async dispose(reason = 'worker disposed') {
+        this._disposing = true;
+        this.initialized = false;
+        this.error = null;
+
+        const failureResult = {
+            success: false,
+            error: {
+                code: 'WORKER_RESET',
+                message: `Worker [${this.name}] 已重置: ${reason}`,
+                retryable: true
+            },
+            workerId: this.name,
+            instanceId: this.instanceName
+        };
+
+        const pendingItems = this._pending.splice(0, this._pending.length);
+        for (const item of pendingItems) {
+            this._clearPendingTimeout(item);
+            try {
+                item.resolve(failureResult);
+            } catch { }
+        }
+
+        const pageRef = this.page;
+        const browserRef = this.browser;
+
+        this.page = null;
+        this.browser = null;
+
+        for (const sharedWorker of this._sharedWorkers) {
+            sharedWorker._disposing = true;
+            sharedWorker.initialized = false;
+            sharedWorker.page = null;
+            sharedWorker.browser = null;
+        }
+
+        try {
+            if (pageRef && !pageRef.isClosed?.()) {
+                await pageRef.close().catch(() => null);
+            }
+        } catch { }
+
+        try {
+            if (this._isBrowserOwner && browserRef && !browserRef.isClosed?.()) {
+                await browserRef.close().catch(() => null);
+            }
+        } catch { }
+
+        this._activeCount = 0;
+        this.busyCount = 0;
+        this._disposing = false;
+        for (const sharedWorker of this._sharedWorkers) {
+            sharedWorker._disposing = false;
+        }
     }
 
     /**

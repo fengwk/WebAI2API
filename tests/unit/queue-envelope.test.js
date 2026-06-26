@@ -31,7 +31,7 @@ function buildExecuteMock(handler) {
     return async (_poolCtx, task) => await handler(task);
 }
 
-function makeQueue({ executeMock, publicFileBaseUrl = '' } = {}) {
+function makeQueue({ executeMock, publicFileBaseUrl = '', resetPoolMock } = {}) {
     const executeTask = executeMock || buildExecuteMock(async () => ({
         success: true, data: { ok: 1 }, workerId: 'w1', instanceId: 'i1',
         page: { url: 'https://example.com', title: 'Example' }
@@ -41,12 +41,13 @@ function makeQueue({ executeMock, publicFileBaseUrl = '' } = {}) {
         {
             initBrowser: async () => ({}),
             executeTask,
+            resetPool: resetPoolMock || (async () => {}),
             config: { server: { publicFileBaseUrl } }
         }
     );
 }
 
-function makeQueueWithInitBrowser({ initBrowserMock, executeMock, publicFileBaseUrl = '' } = {}) {
+function makeQueueWithInitBrowser({ initBrowserMock, executeMock, publicFileBaseUrl = '', resetPoolMock } = {}) {
     const executeTask = executeMock || buildExecuteMock(async () => ({
         success: true, data: { ok: 1 }, workerId: 'w1', instanceId: 'i1',
         page: { url: 'https://example.com', title: 'Example' }
@@ -56,6 +57,7 @@ function makeQueueWithInitBrowser({ initBrowserMock, executeMock, publicFileBase
         {
             initBrowser: initBrowserMock || (async () => ({})),
             executeTask,
+            resetPool: resetPoolMock || (async () => {}),
             config: { server: { publicFileBaseUrl } }
         }
     );
@@ -258,6 +260,62 @@ test('initBrowser 失败时仍返回失败 envelope 并结束响应', async () =
     assert.equal(env.ok, false);
     assert.equal(env.message, 'pool init failed');
     assert.equal(env.meta.requestId, 'req_init_fail');
+});
+
+test('recoverFromFatalRuntime 会中止等待与执行中的任务并重置工作池', async () => {
+    let releaseActive;
+    let resetReason = '';
+    const queue = makeQueue({
+        executeMock: buildExecuteMock(async () => await new Promise((resolve) => { releaseActive = resolve; })),
+        resetPoolMock: async (reason) => { resetReason = reason; }
+    });
+
+    const activeRes = makeRes();
+    const queuedRes = makeRes();
+
+    queue.addTask({
+        res: activeRes,
+        id: 'req_active',
+        adapterId: 'chatgpt',
+        input: {},
+        debug: false,
+        workerId: null,
+        overrideScript: null,
+        endpointPath: '/api/chatgpt',
+        requestSummary: '',
+        requestBody: { input: {} }
+    });
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    queue.addTask({
+        res: queuedRes,
+        id: 'req_queued',
+        adapterId: 'chatgpt',
+        input: {},
+        debug: false,
+        workerId: null,
+        overrideScript: null,
+        endpointPath: '/api/chatgpt',
+        requestSummary: '',
+        requestBody: { input: {} }
+    });
+
+    await queue.recoverFromFatalRuntime('browser runtime crashed');
+    await awaitRes(activeRes);
+    await awaitRes(queuedRes);
+
+    assert.equal(JSON.parse(activeRes.body).ok, false);
+    assert.equal(JSON.parse(queuedRes.body).ok, false);
+    assert.match(JSON.parse(activeRes.body).message, /browser runtime crashed/);
+    assert.equal(resetReason, 'browser runtime crashed');
+
+    releaseActive({
+        success: true,
+        data: { ok: true },
+        workerId: 'w1',
+        instanceId: 'i1',
+        page: { url: 'https://example.com', title: 'Example' }
+    });
 });
 
 test('meta.queuedMs 在任务入队后能反映等待时间', async () => {

@@ -266,4 +266,18 @@ export class PoolManager {
         if (!workerName) return this.workers[0] || null;
         return this.workers.find(worker => worker.name === workerName) || null;
     }
+
+    async dispose(reason = 'pool disposed') {
+        const workers = this.workers.slice();
+        this.workers = [];
+        this.initialized = false;
+
+        for (const worker of workers) {
+            try {
+                await worker.dispose(reason);
+            } catch (err) {
+                logger.warn('工作池', `[${worker.name}] dispose 失败`, { error: err.message, reason });
+            }
+        }
+    }
 }

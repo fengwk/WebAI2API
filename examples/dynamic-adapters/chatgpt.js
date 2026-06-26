@@ -91,7 +91,7 @@ function isAttachmentTransferRequest(request) {
   const url = String(request && typeof request.url === 'function' ? request.url() : '').trim();
   const method = String(request && typeof request.method === 'function' ? request.method() : '').toUpperCase().trim();
   if (!url) return false;
-  if (!/chatgpt\\.com\//i.test(url)) return false;
+  if (!/chatgpt\\.com\\//i.test(url)) return false;
   if (/(upload|attachment|asset|file)/i.test(url)) return true;
   if (method && method !== 'GET' && /backend-api/i.test(url)) return true;
   return false;
@@ -103,6 +103,43 @@ function extractSessionId(url) {
 
 function normalizeText(text) {
   return String(text || '').replace(/\\s+/g, ' ').trim();
+}
+
+function collectProtocolFileHints(value, path, out, depth = 0) {
+  if (!out || out.length >= 40 || depth > 6 || value == null) return;
+  if (typeof value === 'string') {
+    const text = value;
+    const lowered = text.toLowerCase();
+    if (
+      lowered.includes('sandbox_path')
+      || lowered.includes('/mnt/data/')
+      || lowered.includes('interpreter/download')
+      || lowered.includes('download_url')
+      || lowered.includes('backend-api/files/download')
+      || lowered.includes('/backend-api/estuary/content')
+      || lowered.includes('file_name')
+    ) {
+      out.push({ path, preview: text.slice(0, 400) });
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      collectProtocolFileHints(value[index], path + '[' + index + ']', out, depth + 1);
+      if (out.length >= 40) break;
+    }
+    return;
+  }
+  if (typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      if (out.length >= 40) break;
+      const childPath = path ? (path + '.' + key) : key;
+      if (key === 'sandbox_path' || key === 'download_url' || key === 'file_name' || key === 'url') {
+        out.push({ path: childPath, preview: String(child).slice(0, 400) });
+      }
+      collectProtocolFileHints(child, childPath, out, depth + 1);
+    }
+  }
 }
 
 function collectEncodedItems(obj, out) {
@@ -553,6 +590,31 @@ async function waitForAttachmentConfirmation(expectedFileNames, baselineState, m
   return { ok: false, state: await inspectAttachmentUi(expectedFileNames) };
 }
 
+async function detectAttachmentUploadError() {
+  return await page.evaluate(() => {
+    const normalize = text => String(text || '').replace(/\s+/g, ' ').trim();
+    const text = normalize(document.body.innerText || '');
+    const lowered = text.toLowerCase();
+    const phrases = [
+      'unknown error occurred',
+      'failed to upload',
+      'upload failed',
+      '出现未知错误',
+      '上传失败'
+    ];
+    const matched = phrases.filter(phrase => lowered.includes(phrase));
+    return {
+      hasError: matched.length > 0,
+      matched,
+      preview: text.slice(0, 800)
+    };
+  }).catch(() => ({
+    hasError: false,
+    matched: [],
+    preview: ''
+  }));
+}
+
 async function waitForAttachmentTransferReady(expectedFileNames, baselineState, maxMs = 30000) {
   const start = Date.now();
   let lastSignature = '';
@@ -561,11 +623,13 @@ async function waitForAttachmentTransferReady(expectedFileNames, baselineState, 
     const confirmation = await waitForAttachmentConfirmation(expectedFileNames, baselineState, 500).catch(() => ({ ok: false, state: null }));
     const sendState = await sampleSendState();
     const networkState = snapshotUploadNetwork();
+    const uploadError = await detectAttachmentUploadError();
     const idleMs = networkState.lastEventAt ? (Date.now() - networkState.lastEventAt) : (Date.now() - start);
     const sendReady = sendState.sendButton
       ? sendState.sendButton.visible && !sendState.sendButton.disabled
       : !!sendState.composerText;
-    const networkSettled = networkState.pending.length === 0 && idleMs >= 1500;
+    const networkSettled = (networkState.pending.length === 0 && idleMs >= 1500)
+      || (confirmation.ok && idleMs >= 3000);
 
     const signature = JSON.stringify({
       confirmationOk: confirmation.ok,
@@ -574,7 +638,8 @@ async function waitForAttachmentTransferReady(expectedFileNames, baselineState, 
       totalEvents: networkState.totalEvents,
       idleMs,
       sendReady,
-      sendButton: sendState.sendButton
+      sendButton: sendState.sendButton,
+      uploadError
     });
 
     if (signature !== lastSignature) {
@@ -583,18 +648,33 @@ async function waitForAttachmentTransferReady(expectedFileNames, baselineState, 
         confirmation,
         sendState,
         networkState,
+        uploadError,
         idleMs,
         sendReady,
         networkSettled
       });
     }
 
-    if (confirmation.ok && networkSettled && sendReady) {
+    if (uploadError.hasError) {
+      return {
+        ok: false,
+        confirmation,
+        sendState,
+        networkState,
+        uploadError,
+        idleMs,
+        sendReady,
+        networkSettled
+      };
+    }
+
+    if (confirmation.ok && networkSettled) {
       return {
         ok: true,
         confirmation,
         sendState,
         networkState,
+        uploadError,
         idleMs,
         sendReady,
         networkSettled
@@ -607,6 +687,7 @@ async function waitForAttachmentTransferReady(expectedFileNames, baselineState, 
   const confirmation = await waitForAttachmentConfirmation(expectedFileNames, baselineState, 500).catch(() => ({ ok: false, state: null }));
   const sendState = await sampleSendState();
   const networkState = snapshotUploadNetwork();
+  const uploadError = await detectAttachmentUploadError();
   const idleMs = networkState.lastEventAt ? (Date.now() - networkState.lastEventAt) : (Date.now() - start);
   const sendReady = sendState.sendButton
     ? sendState.sendButton.visible && !sendState.sendButton.disabled
@@ -617,9 +698,11 @@ async function waitForAttachmentTransferReady(expectedFileNames, baselineState, 
     confirmation,
     sendState,
     networkState,
+    uploadError,
     idleMs,
     sendReady,
-    networkSettled: networkState.pending.length === 0 && idleMs >= 1500
+    networkSettled: (networkState.pending.length === 0 && idleMs >= 1500)
+      || (confirmation.ok && idleMs >= 3000)
   };
 }
 
@@ -660,65 +743,147 @@ async function uploadAttachments(attachments) {
   log('attachment ui before upload', baselineState);
   await captureDebugState('attachments-before', { screenshot: true, text: true, fullPage: false });
 
-  resetUploadNetworkTracking();
-  uploadNetwork.active = true;
-  uploadNetwork.startedAt = Date.now();
+  const selectors = [
+    'button[aria-label*="Attach"]',
+    'button[aria-label*="attach"]',
+    'button[aria-label*="上传"]',
+    'button[data-testid*="attach"]',
+    '[data-testid*="attach"] button',
+    'button[aria-label*="Add photos"]',
+    'button[aria-label*="files"]'
+  ];
 
-  let action = { ok: false, attempt: null, errors: [] };
-  let transferReady = null;
-  try {
-    action = await trySetFilesOnExistingInput(payloadResult.payloads);
-    if (!action.ok) {
-      const selectors = [
-        'button[aria-label*="Attach"]',
-        'button[aria-label*="attach"]',
-        'button[aria-label*="上传"]',
-        'button[data-testid*="attach"]',
-        '[data-testid*="attach"] button',
-        'button[aria-label*="Add photos"]',
-        'button[aria-label*="files"]'
-      ];
+  async function trySelectFilesViaButtons(filePayloads) {
+    let lastAction = { ok: false, strategy: 'button', error: 'no attach button succeeded' };
+    for (let index = 0; index < selectors.length; index += 1) {
+      const selector = selectors[index];
+      const button = page.locator(selector).first();
+      const count = await button.count().catch(() => 0);
+      if (count <= 0) continue;
+      try {
+        log('attachment button candidate', { selector, index });
+        await button.click({ timeout: 5000 }).catch(() => null);
+        await page.waitForTimeout(400).catch(() => null);
+        await captureDebugState('attachments-open-' + index, { screenshot: true, text: true, fullPage: false });
 
-      for (let index = 0; index < selectors.length; index += 1) {
-        const selector = selectors[index];
-        const button = page.locator(selector).first();
-        const count = await button.count().catch(() => 0);
-        if (count <= 0) continue;
-        try {
-          log('attachment button candidate', { selector, index });
-          await button.click({ timeout: 5000 }).catch(() => null);
-          await page.waitForTimeout(400).catch(() => null);
-          await captureDebugState('attachments-open-' + index, { screenshot: true, text: true, fullPage: false });
-
-          action = await trySetFilesOnExistingInput(payloadResult.payloads);
-          if (action.ok) {
-            action.openedBy = selector;
-            break;
-          }
-
-          const menuAction = await tryUploadMenuAction(payloadResult.payloads);
-          if (menuAction.ok) {
-            action = {
-              ...menuAction,
-              openedBy: selector
-            };
-            break;
-          }
-        } catch (e) {
-          log('attachment button click failed', {
-            selector,
-            error: e && e.message ? e.message : String(e || '')
-          });
+        lastAction = await trySetFilesOnExistingInput(filePayloads);
+        if (lastAction.ok) {
+          lastAction.openedBy = selector;
+          return lastAction;
         }
+
+        const menuAction = await tryUploadMenuAction(filePayloads);
+        if (menuAction.ok) {
+          return {
+            ...menuAction,
+            openedBy: selector
+          };
+        }
+      } catch (e) {
+        log('attachment button click failed', {
+          selector,
+          error: e && e.message ? e.message : String(e || '')
+        });
       }
     }
 
-    log('attachment action result', action);
-    transferReady = await waitForAttachmentTransferReady(expectedFileNames, baselineState, 30000);
-    log('attachment transfer ready result', transferReady);
-    log('attachment network summary', snapshotUploadNetwork());
-  } finally {
-    uploadNetwork.active = false;
+    return lastAction;
+  }
+
+  async function selectFiles(filePayloads, options = {}) {
+    const preferOpenButton = !!options.preferOpenButton;
+
+    if (preferOpenButton) {
+      const viaButtonsFirst = await trySelectFilesViaButtons(filePayloads);
+      if (viaButtonsFirst.ok) return viaButtonsFirst;
+    }
+
+    let currentAction = await trySetFilesOnExistingInput(filePayloads);
+    if (currentAction.ok) return currentAction;
+
+    const viaButtons = await trySelectFilesViaButtons(filePayloads);
+    if (viaButtons.ok) return viaButtons;
+
+    return currentAction;
+  }
+
+  async function uploadBatch(filePayloads, batchFileNames, batchBaselineState, batchLabel, batchOptions = {}) {
+    resetUploadNetworkTracking();
+    uploadNetwork.active = true;
+    uploadNetwork.startedAt = Date.now();
+
+    let batchAction = { ok: false, attempt: null, errors: [] };
+    let batchTransferReady = null;
+    try {
+      batchAction = await selectFiles(filePayloads, batchOptions);
+      log('attachment action result', {
+        label: batchLabel,
+        action: batchAction,
+        expectedFileNames: batchFileNames
+      });
+      batchTransferReady = await waitForAttachmentTransferReady(batchFileNames, batchBaselineState, 30000);
+      log('attachment transfer ready result', {
+        label: batchLabel,
+        ...batchTransferReady
+      });
+      log('attachment network summary', {
+        label: batchLabel,
+        ...snapshotUploadNetwork()
+      });
+    } finally {
+      uploadNetwork.active = false;
+    }
+
+    return {
+      label: batchLabel,
+      action: batchAction,
+      transferReady: batchTransferReady,
+      networkState: snapshotUploadNetwork()
+    };
+  }
+
+  let action = { ok: false, attempt: null, errors: [] };
+  let transferReady = null;
+  let currentBaselineState = baselineState;
+  const batchResults = [];
+
+  if (payloadResult.payloads.length > 1) {
+    for (let index = 0; index < payloadResult.payloads.length; index += 1) {
+      const batchLabel = 'item-' + (index + 1);
+      const filePayload = payloadResult.payloads[index];
+      const fileName = payloadResult.resolved[index] && payloadResult.resolved[index].fileName || ('attachment-' + (index + 1));
+      await api.step('attachments:item', {
+        index: index + 1,
+        total: payloadResult.payloads.length,
+        fileName
+      }).catch(() => null);
+
+      const batchResult = await uploadBatch(
+        [filePayload],
+        [fileName],
+        currentBaselineState,
+        batchLabel,
+        { preferOpenButton: index > 0 }
+      );
+      batchResults.push(batchResult);
+      action = batchResult.action;
+      transferReady = batchResult.transferReady;
+
+      const batchOk = batchResult.action && batchResult.action.ok && batchResult.transferReady && batchResult.transferReady.ok;
+      if (!batchOk) {
+        break;
+      }
+
+      currentBaselineState = batchResult.transferReady.confirmation && batchResult.transferReady.confirmation.state
+        ? batchResult.transferReady.confirmation.state
+        : currentBaselineState;
+      await page.waitForTimeout(600).catch(() => null);
+    }
+  } else {
+    const batchResult = await uploadBatch(payloadResult.payloads, expectedFileNames, currentBaselineState, 'batch');
+    batchResults.push(batchResult);
+    action = batchResult.action;
+    transferReady = batchResult.transferReady;
   }
 
   await captureDebugState('attachments-after', { screenshot: true, text: true, fullPage: false });
@@ -731,14 +896,16 @@ async function uploadAttachments(attachments) {
       resolveErrors: payloadResult.errors,
       baselineState,
       transferReady,
-      networkState: snapshotUploadNetwork()
+      networkState: snapshotUploadNetwork(),
+      batchResults
     }));
   }
 
   await api.step('attachments:confirmed', {
     expectedFileNames,
     action,
-    transferReady
+    transferReady,
+    batchResults
   }).catch(() => null);
 
   return {
@@ -748,6 +915,7 @@ async function uploadAttachments(attachments) {
     confirmed: true,
     action,
     transferReady,
+    batchResults,
     errors: payloadResult.errors
   };
 }
@@ -800,6 +968,206 @@ function imageMimeToExtension(mimeType) {
   return 'bin';
 }
 
+function mimeTypeToExtension(mimeType) {
+  const normalized = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  if (!normalized) return 'bin';
+  if (normalized === 'image/png') return 'png';
+  if (normalized === 'image/jpeg') return 'jpg';
+  if (normalized === 'image/webp') return 'webp';
+  if (normalized === 'image/gif') return 'gif';
+  if (normalized === 'application/json') return 'json';
+  if (normalized === 'text/csv') return 'csv';
+  if (normalized === 'text/plain') return 'txt';
+  if (normalized === 'text/markdown') return 'md';
+  if (normalized === 'application/zip') return 'zip';
+  if (normalized === 'application/pdf') return 'pdf';
+  if (normalized === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') return 'xlsx';
+  if (normalized === 'application/vnd.ms-excel') return 'xls';
+  if (normalized === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') return 'docx';
+  if (normalized === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') return 'pptx';
+  return normalized.split('/')[1] || 'bin';
+}
+
+function sanitizeFileName(fileName, fallback = 'file.bin') {
+  const value = String(fileName || '').trim().replace(/[\\/:*?"<>|]+/g, '_');
+  return value || fallback;
+}
+
+function extractFileNameFromUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    const fn = url.searchParams.get('fn');
+    if (fn) return fn;
+    const sandboxPath = url.searchParams.get('sandbox_path');
+    if (sandboxPath) {
+      const parts = String(sandboxPath).split('/').filter(Boolean);
+      if (parts.length) return parts[parts.length - 1];
+    }
+    const pathName = url.pathname.split('/').filter(Boolean).pop() || '';
+    return decodeURIComponent(pathName);
+  } catch {
+    return '';
+  }
+}
+
+function extractFileNameFromArtifact(artifact) {
+  if (!artifact) return '';
+  const rawCandidates = [
+    artifact.fileName,
+    artifact.download,
+    artifact.aria,
+    artifact.text,
+    artifact.outerHTML
+  ].filter(Boolean).map(item => String(item));
+
+  for (const raw of rawCandidates) {
+    const text = raw.replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();
+    const lowered = text.toLowerCase();
+    const withoutPrefix = lowered.startsWith('下载 ') ? text.slice(3).trim() : text;
+    const match = withoutPrefix.match(/([A-Za-z0-9_()\\-\\. ]+\\.(json|csv|zip|txt|md|pdf|xlsx?|docx?|pptx?))/i);
+    if (match && match[1]) {
+      return match[1].replace(/\\s+/g, ' ').trim();
+    }
+  }
+  return '';
+}
+
+function fileNameFromSandboxPath(value) {
+  const text = String(value || '').trim();
+  const normalized = text.replace(/^sandbox:/i, '');
+  const parts = normalized.split('/').filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : '';
+}
+
+function extractSandboxPathsFromProtocolHints(hints) {
+  const out = [];
+  const seen = new Set();
+  for (const item of hints || []) {
+    const preview = String(item && item.preview || '');
+    const matches = preview.match(/(?:sandbox:)?\\/mnt\\/data\\/[^\\s'"\\])>]+/g) || [];
+    for (const raw of matches) {
+      const normalized = raw.replace(/^sandbox:/i, '');
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      out.push(normalized);
+    }
+  }
+  return out;
+}
+
+async function discoverPageAccessToken() {
+  return await page.evaluate(async () => {
+    const result = {
+      token: '',
+      tokenSource: '',
+      sessionPreview: '',
+      sessionError: '',
+      localStorageKeys: [],
+      sessionStorageKeys: []
+    };
+
+    try {
+      result.localStorageKeys = Object.keys(window.localStorage || {});
+    } catch {}
+    try {
+      result.sessionStorageKeys = Object.keys(window.sessionStorage || {});
+    } catch {}
+
+    const pickToken = value => {
+      if (!value) return '';
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (/^eyJ/i.test(trimmed) || trimmed.length > 20) return trimmed;
+        return '';
+      }
+      if (typeof value === 'object') {
+        for (const key of ['accessToken', 'access_token', 'token', 'bearerToken']) {
+          const nested = pickToken(value[key]);
+          if (nested) return nested;
+        }
+      }
+      return '';
+    };
+
+    try {
+      const response = await fetch('/api/auth/session', { credentials: 'include' });
+      const text = await response.text();
+      result.sessionPreview = text.slice(0, 500);
+      try {
+        const payload = JSON.parse(text);
+        const token = pickToken(payload);
+        if (token) {
+          result.token = token;
+          result.tokenSource = 'api/auth/session';
+        }
+      } catch {}
+    } catch (error) {
+      result.sessionError = error && error.message ? error.message : String(error || '');
+    }
+
+    if (!result.token) {
+      const stores = [
+        { name: 'localStorage', store: window.localStorage },
+        { name: 'sessionStorage', store: window.sessionStorage }
+      ];
+      for (const { name, store } of stores) {
+        if (!store) continue;
+        for (const key of Object.keys(store)) {
+          const raw = store.getItem(key);
+          const token = pickToken(raw);
+          if (token) {
+            result.token = token;
+            result.tokenSource = name + ':' + key;
+            break;
+          }
+          try {
+            const parsed = JSON.parse(raw);
+            const nestedToken = pickToken(parsed);
+            if (nestedToken) {
+              result.token = nestedToken;
+              result.tokenSource = name + ':' + key;
+              break;
+            }
+          } catch {}
+        }
+        if (result.token) break;
+      }
+    }
+
+    return result;
+  }).catch(() => ({
+    token: '',
+    tokenSource: '',
+    sessionPreview: '',
+    sessionError: 'evaluate-failed',
+    localStorageKeys: [],
+    sessionStorageKeys: []
+  }));
+}
+
+function parseFileNameFromContentDisposition(contentDisposition) {
+  const value = String(contentDisposition || '');
+  const starMatch = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (starMatch && starMatch[1]) {
+    try {
+      return decodeURIComponent(starMatch[1]);
+    } catch {
+      return starMatch[1];
+    }
+  }
+  const match = value.match(/filename="?([^";]+)"?/i);
+  return match && match[1] ? match[1] : '';
+}
+
+function parseAssetPointer(value) {
+  const text = String(value || '').trim();
+  const fileMatch = text.match(/^file-service:\\/\\/([A-Za-z0-9_-]+)/i);
+  if (fileMatch) return { type: 'file-service', id: fileMatch[1] };
+  const sedimentMatch = text.match(/^sediment:\\/\\/([A-Za-z0-9_-]+)/i);
+  if (sedimentMatch) return { type: 'sediment', id: sedimentMatch[1] };
+  return null;
+}
+
 async function collectDomImageCandidates() {
   return await page.evaluate(() => {
     const out = [];
@@ -812,19 +1180,567 @@ async function collectDomImageCandidates() {
       const width = Number(node.naturalWidth || node.width || 0);
       const height = Number(node.naturalHeight || node.height || 0);
       const alt = String(node.getAttribute('alt') || '').trim();
-      const likelyGenerated = (width >= 256 && height >= 256)
+      const messageNode = node.closest('[data-message-author-role]');
+      const role = String(messageNode && messageNode.getAttribute('data-message-author-role') || '').trim().toLowerCase();
+      const buttonNode = node.closest('button');
+      const buttonAria = String(buttonNode && buttonNode.getAttribute('aria-label') || '').trim();
+      const likelyGenerated = (
+        role === 'assistant'
+        && width >= 64
+        && height >= 64
         && (
           src.includes('/backend-api/estuary/content')
           || src.startsWith('blob:')
           || src.startsWith('data:image/')
           || alt.toLowerCase().includes('generated image')
-        );
+          || buttonAria.toLowerCase().includes('open image')
+        )
+      ) || (
+        width >= 64
+        && height >= 64
+        && alt.toLowerCase().includes('generated image')
+      );
       if (!likelyGenerated) continue;
       seen.add(src);
-      out.push({ src, alt, width, height });
+      out.push({ src, alt, width, height, role, buttonAria });
     }
     return out;
   }).catch(() => []);
+}
+
+async function inspectVisibleImages() {
+  return await page.evaluate(() => {
+    const out = [];
+    const nodes = Array.from(document.querySelectorAll('img'));
+    for (const node of nodes) {
+      if (!(node.offsetWidth || node.offsetHeight || node.getClientRects().length)) continue;
+      const src = String(node.currentSrc || node.getAttribute('src') || '').trim();
+      const width = Number(node.naturalWidth || node.width || 0);
+      const height = Number(node.naturalHeight || node.height || 0);
+      const alt = String(node.getAttribute('alt') || '').trim();
+      const messageNode = node.closest('[data-message-author-role]');
+      const role = String(messageNode && messageNode.getAttribute('data-message-author-role') || '').trim().toLowerCase();
+      const buttonNode = node.closest('button');
+      const buttonAria = String(buttonNode && buttonNode.getAttribute('aria-label') || '').trim();
+      out.push({ src, alt, width, height, role, buttonAria });
+    }
+    return out.slice(0, 30);
+  }).catch(() => []);
+}
+
+async function inspectAssistantFileArtifacts() {
+  return await page.evaluate(() => {
+    const normalize = text => String(text || '').replace(/\s+/g, ' ').trim();
+    const isVisible = node => !!(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+    const looksFileLike = text => /\.(csv|json|zip|txt|md|pdf|xlsx?|docx?|pptx?)\b/i.test(text);
+    const looksDownloadLike = text => /download|open file|file|attachment|下载|文件/i.test(text);
+    const out = [];
+    const messages = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]')).filter(isVisible);
+    for (const message of messages) {
+      const messageId = String(message.getAttribute('data-message-id') || '');
+      const candidates = Array.from(message.querySelectorAll('a, button'));
+      for (const node of candidates) {
+        if (!isVisible(node)) continue;
+        const text = normalize(node.innerText || '');
+        const aria = String(node.getAttribute('aria-label') || '').trim();
+        const href = node.tagName.toLowerCase() === 'a' ? String(node.getAttribute('href') || '').trim() : '';
+        const download = String(node.getAttribute('download') || '').trim();
+        const combined = [text, aria, href, download].join(' ');
+        if (!combined || (!looksFileLike(combined) && !looksDownloadLike(combined))) continue;
+        out.push({
+          kind: node.tagName.toLowerCase(),
+          messageId,
+          text,
+          aria,
+          href,
+          download,
+          testId: String(node.getAttribute('data-testid') || '').trim(),
+          className: String(node.getAttribute('class') || '').trim(),
+          role: String(node.getAttribute('role') || '').trim()
+        });
+      }
+
+      const textNodes = Array.from(message.querySelectorAll('div, span, p, li'));
+      for (const node of textNodes) {
+        if (!isVisible(node)) continue;
+        const text = normalize(node.innerText || '');
+        if (!text || (!looksFileLike(text) && !looksDownloadLike(text))) continue;
+        out.push({
+          kind: 'text',
+          messageId,
+          text: text.slice(0, 300),
+          aria: '',
+          href: '',
+          download: '',
+          testId: '',
+          className: String(node.getAttribute('class') || '').trim(),
+          role: String(node.getAttribute('role') || '').trim()
+        });
+      }
+    }
+    return out.slice(0, 60);
+  }).catch(() => []);
+}
+
+async function inspectAssistantFileArtifactsDetailed() {
+  return await page.evaluate(() => {
+    const normalize = text => String(text || '').replace(/\s+/g, ' ').trim();
+    const isVisible = node => !!(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+    const looksFileLike = text => /\.(csv|json|zip|txt|md|pdf|xlsx?|docx?|pptx?)\b/i.test(text);
+    const looksDownloadLike = text => /download|open file|file|attachment|下载|文件/i.test(text);
+    const out = [];
+    const messages = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]')).filter(isVisible);
+    for (const message of messages) {
+      const messageId = String(message.getAttribute('data-message-id') || '');
+      const candidates = Array.from(message.querySelectorAll('a, button, [role="button"]'));
+      for (const node of candidates) {
+        if (!isVisible(node)) continue;
+        const text = normalize(node.innerText || '');
+        const aria = String(node.getAttribute('aria-label') || '').trim();
+        const href = node.tagName.toLowerCase() === 'a' ? String(node.getAttribute('href') || '').trim() : '';
+        const download = String(node.getAttribute('download') || '').trim();
+        const combined = [text, aria, href, download].join(' ');
+        if (!combined || (!looksFileLike(combined) && !looksDownloadLike(combined))) continue;
+        const parent = node.parentElement;
+        out.push({
+          kind: node.tagName.toLowerCase(),
+          messageId,
+          text,
+          aria,
+          href,
+          download,
+          testId: String(node.getAttribute('data-testid') || '').trim(),
+          className: String(node.getAttribute('class') || '').trim(),
+          role: String(node.getAttribute('role') || '').trim(),
+          outerHTML: String(node.outerHTML || '').slice(0, 1500),
+          parentHTML: String(parent && parent.outerHTML || '').slice(0, 2000)
+        });
+      }
+    }
+    return out.slice(0, 20);
+  }).catch(() => []);
+}
+
+function looksLikeFileArtifactText(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return false;
+  return /download|open file|file|attachment|下载|文件/.test(text)
+    || /\.(csv|json|zip|txt|md|pdf|xlsx?|docx?|pptx?)\b/.test(text);
+}
+
+function messageTextFromConversationMessage(message) {
+  const content = message && message.content || {};
+  const parts = Array.isArray(content.parts) ? content.parts : [];
+  const texts = [];
+  for (const part of parts) {
+    if (typeof part === 'string') {
+      texts.push(part);
+      continue;
+    }
+    if (!part || typeof part !== 'object') continue;
+    if (typeof part.text === 'string') {
+      texts.push(part.text);
+      continue;
+    }
+    if (typeof part.content === 'string') {
+      texts.push(part.content);
+    }
+  }
+  return texts.join('');
+}
+
+async function fetchConversationDetail(conversationId) {
+  if (!conversationId) return null;
+  try {
+    const r = await page.request.get('https://chatgpt.com/backend-api/conversation/' + conversationId, {
+      timeout: 30000,
+      headers: { Accept: 'application/json' }
+    });
+    if (!r.ok()) return null;
+    return await r.json();
+  } catch (e) {
+    log('fetch conversation detail failed', {
+      conversationId,
+      error: e && e.message ? e.message : String(e || '')
+    });
+    return null;
+  }
+}
+
+function extractAssistantConversationState(data) {
+  const mapping = data && data.mapping || {};
+  const records = [];
+  for (const messageId in mapping) {
+    const node = mapping[messageId] || {};
+    const message = node.message || {};
+    const author = message.author || {};
+    if (String(author.role || '').trim().toLowerCase() !== 'assistant') continue;
+    const metadata = message.metadata || {};
+    const content = message.content || {};
+    const attachments = Array.isArray(metadata.attachments)
+      ? metadata.attachments.map(item => ({
+        id: String(item && item.id || ''),
+        name: String(item && item.name || ''),
+        mimeType: String(item && item.mimeType || ''),
+        size: Number(item && item.size || 0)
+      })).filter(item => item.id || item.name)
+      : [];
+    const assetPointers = [];
+    const parts = Array.isArray(content.parts) ? content.parts : [];
+    for (const part of parts) {
+      if (!part || typeof part !== 'object') continue;
+      const pointer = parseAssetPointer(part.asset_pointer);
+      if (pointer && !assetPointers.some(item => item.type === pointer.type && item.id === pointer.id)) {
+        assetPointers.push(pointer);
+      }
+    }
+    records.push({
+      messageId,
+      createTime: Number(message.create_time || 0),
+      status: String(message.status || ''),
+      endTurn: message.end_turn === true,
+      text: String(messageTextFromConversationMessage(message) || ''),
+      attachments,
+      assetPointers
+    });
+  }
+  records.sort((a, b) => a.createTime - b.createTime);
+  return {
+    latest: records.length ? records[records.length - 1] : null,
+    records
+  };
+}
+
+async function pollConversationAssistantState(conversationId, maxMs = 30000) {
+  if (!conversationId) return null;
+  const start = Date.now();
+  let lastState = null;
+  let lastSignature = '';
+  let stableSince = Date.now();
+  while (Date.now() - start < maxMs) {
+    const data = await fetchConversationDetail(conversationId);
+    if (data) {
+      const state = extractAssistantConversationState(data);
+      lastState = state;
+      const latest = state && state.latest || null;
+      const text = String(latest && latest.text || '');
+      const signature = JSON.stringify({
+        text,
+        status: latest && latest.status || '',
+        endTurn: latest && latest.endTurn || false,
+        attachments: latest && latest.attachments || [],
+        assetPointers: latest && latest.assetPointers || []
+      });
+      if (signature !== lastSignature) {
+        lastSignature = signature;
+        stableSince = Date.now();
+        log('conversation detail assistant state', {
+          conversationId,
+          textLength: text.length,
+          status: latest && latest.status || '',
+          endTurn: latest && latest.endTurn || false,
+          attachmentCount: latest && latest.attachments ? latest.attachments.length : 0,
+          assetPointerCount: latest && latest.assetPointers ? latest.assetPointers.length : 0
+        });
+      }
+      const hasMaterial = !!text || !!(latest && latest.attachments && latest.attachments.length) || !!(latest && latest.assetPointers && latest.assetPointers.length);
+      const stable = hasMaterial && (Date.now() - stableSince >= 3000);
+      const finished = latest && (latest.status === 'finished_successfully' || latest.endTurn === true);
+      if (stable && finished) {
+        return state;
+      }
+    }
+    await page.waitForTimeout(1500).catch(() => null);
+  }
+  return lastState;
+}
+
+async function resolveConversationFileDownload(pointer, conversationId) {
+  const candidateId = String(pointer && pointer.id || '').trim();
+  const candidateType = String(pointer && pointer.type || '').trim();
+  if (!candidateId) return { url: '', pointerType: candidateType || 'unknown' };
+
+  const attempts = [];
+  if (candidateType === 'file-service') {
+    attempts.push({ type: 'file-service', url: 'https://chatgpt.com/backend-api/files/' + candidateId + '/download' });
+  } else if (candidateType === 'sediment' && conversationId) {
+    attempts.push({ type: 'sediment', url: 'https://chatgpt.com/backend-api/conversation/' + conversationId + '/attachment/' + candidateId + '/download' });
+  } else {
+    attempts.push({ type: 'file-service', url: 'https://chatgpt.com/backend-api/files/' + candidateId + '/download' });
+    if (conversationId) {
+      attempts.push({ type: 'sediment', url: 'https://chatgpt.com/backend-api/conversation/' + conversationId + '/attachment/' + candidateId + '/download' });
+    }
+  }
+
+  for (const attempt of attempts) {
+    try {
+      const response = await page.request.get(attempt.url, { timeout: 30000, headers: { Accept: 'application/json' } });
+      if (!response.ok()) continue;
+      const data = await response.json().catch(() => ({}));
+      const downloadUrl = data.download_url || data.url || '';
+      if (downloadUrl) {
+        return { url: downloadUrl, pointerType: attempt.type };
+      }
+    } catch (e) {
+      log('conversation file download resolve failed', {
+        candidateId,
+        pointerType: attempt.type,
+        error: e && e.message ? e.message : String(e || '')
+      });
+    }
+  }
+
+  return { url: '', pointerType: candidateType || 'unknown' };
+}
+
+async function downloadConversationFileArtifact(downloadUrl, options = {}) {
+  if (!downloadUrl) return null;
+  try {
+    const response = await page.request.get(downloadUrl, { timeout: 120000 });
+    if (!response.ok()) return null;
+    let buffer = null;
+    try {
+      const rawBody = await response.body();
+      buffer = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody);
+    } catch (bodyError) {
+      const textBody = await response.text().catch(() => '');
+      buffer = Buffer.from(String(textBody || ''), 'utf8');
+      log('download conversation file fell back to text body', {
+        downloadUrl,
+        error: bodyError && bodyError.message ? bodyError.message : String(bodyError || ''),
+        textLength: textBody.length
+      });
+    }
+    const mimeType = String(response.headers()['content-type'] || options.mimeType || 'application/octet-stream').split(';')[0].trim().toLowerCase() || 'application/octet-stream';
+    const headerFileName = parseFileNameFromContentDisposition(response.headers()['content-disposition'] || '');
+    const urlFileName = extractFileNameFromUrl(downloadUrl);
+    const preferredName = sanitizeFileName(options.fileName || headerFileName || urlFileName || ('file_' + Date.now() + '.' + mimeTypeToExtension(mimeType)));
+    const ext = preferredName.includes('.') ? '' : ('.' + mimeTypeToExtension(mimeType));
+    const finalName = sanitizeFileName(preferredName + ext);
+    const isTextLike = /^text\\//.test(mimeType) || mimeType === 'application/json' || mimeType === 'application/xml';
+    let contentForSave = buffer;
+    if (isTextLike) {
+      const textBody = await response.text().catch(() => buffer.toString('utf8'));
+      contentForSave = String(textBody || '');
+    }
+    let saved = null;
+    try {
+      saved = await api.saveFile({
+        relativePath: 'files/' + Date.now() + '_' + finalName,
+        content: contentForSave,
+        mimeType
+      });
+    } catch (saveError) {
+      log('save conversation file failed', {
+        downloadUrl,
+        mimeType,
+        finalName,
+        isTextLike,
+        isBuffer: Buffer.isBuffer(buffer),
+        bufferType: buffer && buffer.constructor ? buffer.constructor.name : typeof buffer,
+        bufferLength: buffer && typeof buffer.length === 'number' ? buffer.length : null,
+        error: saveError && saveError.message ? saveError.message : String(saveError || '')
+      });
+      return null;
+    }
+    return {
+      url: saved.url,
+      name: finalName,
+      mimeType,
+      downloadUrl
+    };
+  } catch (e) {
+    log('download conversation file failed', {
+      downloadUrl,
+      error: e && e.message ? e.message : String(e || '')
+    });
+    return null;
+  }
+}
+
+async function resolveAssistantFilesFromConversationState(conversationId, state) {
+  const latest = state && state.latest || null;
+  if (!latest) return [];
+
+  const candidates = [];
+  for (const item of latest.attachments || []) {
+    candidates.push({
+      id: item.id,
+      type: item.id && /^file[-_]/i.test(item.id) ? 'file-service' : 'unknown',
+      fileName: item.name,
+      mimeType: item.mimeType,
+      size: item.size
+    });
+  }
+  for (const pointer of latest.assetPointers || []) {
+    const exists = candidates.some(item => item.id === pointer.id && item.type === pointer.type);
+    if (!exists) candidates.push({ id: pointer.id, type: pointer.type, fileName: '', mimeType: '', size: 0 });
+  }
+
+  const results = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const key = String(candidate.type || 'unknown') + ':' + String(candidate.id || candidate.fileName || '');
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const resolved = await resolveConversationFileDownload(candidate, conversationId);
+    if (!resolved.url) continue;
+    const saved = await downloadConversationFileArtifact(resolved.url, {
+      fileName: candidate.fileName,
+      mimeType: candidate.mimeType
+    });
+    if (!saved) continue;
+    results.push({
+      ...saved,
+      id: candidate.id,
+      pointerType: resolved.pointerType,
+      size: candidate.size || 0
+    });
+  }
+  return results;
+}
+
+async function resolveDomFileArtifacts(artifacts) {
+  const results = [];
+  const seen = new Set();
+  for (const item of artifacts || []) {
+    const href = String(item && item.href || '').trim();
+    if (!href) continue;
+    if (/^(javascript:|mailto:)/i.test(href)) continue;
+    let absoluteUrl = href;
+    try {
+      absoluteUrl = new URL(href, page.url()).toString();
+    } catch {
+      absoluteUrl = href;
+    }
+    if (seen.has(absoluteUrl)) continue;
+    seen.add(absoluteUrl);
+    const saved = await downloadConversationFileArtifact(absoluteUrl, {
+      fileName: item.download || item.text || item.aria || ''
+    });
+    if (!saved) continue;
+    results.push({
+      ...saved,
+      id: '',
+      pointerType: 'dom-link',
+      size: 0
+    });
+  }
+  return results;
+}
+
+async function probeDomFileArtifactDownload(artifact, maxMs = 8000, options = {}) {
+  if (!artifact || !artifact.messageId) {
+    return { clicked: false, events: [], downloadUrl: '' };
+  }
+
+  const events = [];
+  const conversationId = extractSessionId(page.url());
+  const fileName = String(options.fileName || extractFileNameFromArtifact(artifact) || '').trim();
+  let downloadUrl = '';
+  if (!conversationId || !fileName) {
+    return { clicked: false, events, downloadUrl: '', fileName };
+  }
+
+  const sandboxPath = String(options.sandboxPath || ('/mnt/data/' + fileName)).trim();
+  const directUrl = 'https://chatgpt.com/backend-api/conversation/'
+    + conversationId
+    + '/interpreter/download?message_id='
+    + encodeURIComponent(String(artifact.messageId || ''))
+    + '&sandbox_path='
+    + encodeURIComponent(sandboxPath);
+
+  events.push({
+    phase: 'direct-request',
+    method: 'GET',
+    url: directUrl,
+    fileName,
+    sandboxPath
+  });
+  try {
+    const doFetch = async (fetchOptions) => await page.evaluate(async ({ url, timeoutMs, authorization }) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const headers = { Accept: 'application/json' };
+        if (authorization) headers.Authorization = authorization;
+        const r = await fetch(url, {
+          method: 'GET',
+          credentials: 'include',
+          headers,
+          signal: controller.signal
+        });
+        const bodyText = await r.text();
+        return {
+          ok: r.ok,
+          status: r.status,
+          contentType: r.headers.get('content-type') || '',
+          bodyText
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          status: 0,
+          contentType: '',
+          bodyText: '',
+          error: error && error.message ? error.message : String(error || '')
+        };
+      } finally {
+        clearTimeout(timer);
+      }
+    }, fetchOptions);
+
+    let response = await doFetch({ url: directUrl, timeoutMs: maxMs, authorization: '' });
+    events.push({
+      phase: 'direct-response',
+      status: response.status,
+      url: directUrl,
+      contentType: response.contentType || '',
+      bodyPreview: String(response.bodyText || '').slice(0, 1000),
+      error: response.error || ''
+    });
+    if (!response.ok && response.status === 401) {
+      const authState = await discoverPageAccessToken();
+      events.push({
+        phase: 'auth-discovery',
+        tokenFound: !!authState.token,
+        tokenSource: authState.tokenSource,
+        sessionPreview: String(authState.sessionPreview || '').slice(0, 300),
+        sessionError: authState.sessionError || '',
+        localStorageKeys: (authState.localStorageKeys || []).slice(0, 20),
+        sessionStorageKeys: (authState.sessionStorageKeys || []).slice(0, 20)
+      });
+      if (authState.token) {
+        response = await doFetch({
+          url: directUrl,
+          timeoutMs: maxMs,
+          authorization: 'Bearer ' + authState.token
+        });
+        events.push({
+          phase: 'direct-response-auth',
+          status: response.status,
+          url: directUrl,
+          contentType: response.contentType || '',
+          bodyPreview: String(response.bodyText || '').slice(0, 1000),
+          error: response.error || ''
+        });
+      }
+    }
+    if (response.ok) {
+      try {
+        const payload = JSON.parse(String(response.bodyText || ''));
+        downloadUrl = payload.download_url || payload.url || '';
+      } catch {}
+    }
+  } catch (e) {
+    events.push({
+      phase: 'direct-error',
+      url: directUrl,
+      error: e && e.message ? e.message : String(e || '')
+    });
+  }
+
+  return { clicked: false, events, downloadUrl, fileName };
 }
 
 async function fetchBrowserBlobAsDataUrl(src) {
@@ -853,10 +1769,20 @@ async function resolveDomImages(candidates) {
       let buffer = null;
       let mimeType = 'image/png';
       if (/^https?:\\/\\//i.test(src)) {
-        const response = await page.request.get(src, { timeout: 90000 });
-        if (!response.ok()) continue;
-        mimeType = response.headers()['content-type'] || mimeType;
-        buffer = await response.body();
+        if (src.includes('/backend-api/estuary/content')) {
+          const dataUrl = await fetchBrowserBlobAsDataUrl(src);
+          const match = /^data:([^;]+);base64,(.+)$/s.exec(dataUrl);
+          if (match) {
+            mimeType = match[1].trim().toLowerCase();
+            buffer = Buffer.from(match[2], 'base64');
+          }
+        }
+        if (!buffer || !buffer.length) {
+          const response = await page.request.get(src, { timeout: 90000 });
+          if (!response.ok()) continue;
+          mimeType = response.headers()['content-type'] || mimeType;
+          buffer = await response.body();
+        }
       } else if (src.startsWith('data:')) {
         const match = /^data:([^;]+);base64,(.+)$/s.exec(src);
         if (!match) continue;
@@ -980,6 +1906,34 @@ async function sampleNewAssistantText(baselineIds) {
   }, baselineIds).catch(() => '');
 }
 
+async function sampleAssistantFileArtifactSummary(baselineIds) {
+  return await page.evaluate((baseline) => {
+    const normalize = text => String(text || '').replace(/\s+/g, ' ').trim();
+    const isVisible = node => !!(node && (node.offsetWidth || node.offsetHeight || node.getClientRects().length));
+    const looksFileLike = text => /\.(csv|json|zip|txt|md|pdf|xlsx?|docx?|pptx?)\b/i.test(text);
+    const looksDownloadLike = text => /download|open file|file|attachment|下载|文件/i.test(text);
+    const items = [];
+    const messages = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+    for (const message of messages) {
+      const messageId = String(message.getAttribute('data-message-id') || '');
+      if (messageId && baseline.includes(messageId)) continue;
+      if (!isVisible(message)) continue;
+      const candidates = Array.from(message.querySelectorAll('a, button, [role="button"], div, span, p, li'));
+      for (const node of candidates) {
+        if (!isVisible(node)) continue;
+        const text = normalize(node.innerText || '');
+        if (!text) continue;
+        if (!looksFileLike(text) && !looksDownloadLike(text)) continue;
+        items.push({ messageId, text: text.slice(0, 200), tag: node.tagName.toLowerCase() });
+      }
+    }
+    return {
+      count: items.length,
+      items: items.slice(0, 20)
+    };
+  }, baselineIds).catch(() => ({ count: 0, items: [] }));
+}
+
 async function sampleSendState() {
   return await page.evaluate(() => {
     const normalize = text => String(text || '').replace(/\\s+/g, ' ').trim();
@@ -1066,23 +2020,15 @@ async function triggerSendAction(preferClick = false) {
   return { ok: false, attempt: null, errors };
 }
 
-async function dismissAnyDialog() {
+async function dismissAnyDialog(options = {}) {
+  const allowEscape = options && options.allowEscape === true;
   const hasDialog = await page.evaluate(() => {
     return Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]'))
       .some(node => !!(node.offsetWidth || node.offsetHeight));
   }).catch(() => false);
   if (!hasDialog) return false;
 
-  await page.keyboard.press('Escape').catch(() => null);
-  await page.waitForTimeout(300, { timeout: 1000 }).catch(() => null);
-
-  const dismissedByEscape = await page.evaluate(() => {
-    return !Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]'))
-      .some(node => !!(node.offsetWidth || node.offsetHeight));
-  }).catch(() => false);
-  if (dismissedByEscape) return true;
-
-  return await page.evaluate(() => {
+  const dismissedByButtons = await page.evaluate(() => {
     const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]'))
       .filter(node => !!(node.offsetWidth || node.offsetHeight));
     if (!dialogs.length) return false;
@@ -1109,6 +2055,23 @@ async function dismissAnyDialog() {
     }
     return false;
   }).catch(() => false);
+  if (dismissedByButtons) {
+    await page.waitForTimeout(300, { timeout: 1000 }).catch(() => null);
+    return true;
+  }
+
+  if (!allowEscape) return false;
+
+  const canUseEscape = !(progress && (progress.sendStartedAt !== null || progress.firstProgressAt !== null));
+  if (!canUseEscape) return false;
+
+  await page.keyboard.press('Escape').catch(() => null);
+  await page.waitForTimeout(300, { timeout: 1000 }).catch(() => null);
+
+  return await page.evaluate(() => {
+    return !Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]'))
+      .some(node => !!(node.offsetWidth || node.offsetHeight));
+  }).catch(() => false);
 }
 
 async function waitUntilPageReady(maxMs = 25000) {
@@ -1117,7 +2080,7 @@ async function waitUntilPageReady(maxMs = 25000) {
   while (Date.now() - start < maxMs) {
     const state = await sampleUiState();
     if (state.dialogs.length > 0) {
-      await dismissAnyDialog();
+      await dismissAnyDialog({ allowEscape: true });
       await page.waitForTimeout(500, { timeout: 1200 }).catch(() => null);
       continue;
     }
@@ -1139,7 +2102,7 @@ async function waitForRouteState(expectedSid, maxMs = 12000) {
   while (Date.now() - start < maxMs) {
     const state = await sampleUiState();
     if (state.dialogs.length > 0) {
-      await dismissAnyDialog();
+      await dismissAnyDialog({ allowEscape: true });
     }
 
     const currentSid = extractSessionId(page.url());
@@ -1229,7 +2192,7 @@ async function waitForWebsocketReady(maxMs = 8000) {
     }
     const ui = await sampleUiState();
     if (ui.dialogs.length > 0) {
-      await dismissAnyDialog();
+      await dismissAnyDialog({ allowEscape: true });
     }
     await page.waitForTimeout(500, { timeout: 1500 }).catch(() => null);
   }
@@ -1499,9 +2462,16 @@ try {
     log('attachments processed', attached);
   }
 
-  const sendReady = await waitForSendReady(input.attachments && input.attachments.length ? 20000 : 12000);
+  const attachmentsCount = Array.isArray(input.attachments) ? input.attachments.length : 0;
+  const sendReadyTimeoutMs = attachmentsCount > 1
+    ? 60000
+    : (attachmentsCount > 0 ? 30000 : 12000);
+  const sendReady = await waitForSendReady(sendReadyTimeoutMs);
   log('send ready result', sendReady);
   await captureDebugState('before-send', { screenshot: true, text: true, fullPage: false });
+  if (!sendReady.ok) {
+    throw new Error('SEND_NOT_READY:' + JSON.stringify(sendReady.state || {}));
+  }
 
   progress.sendStartedAt = Date.now() - t0;
   const primarySend = await triggerSendAction(!!(input.attachments && input.attachments.length));
@@ -1583,14 +2553,21 @@ try {
       break;
     }
 
+    const fileArtifactSummary = await sampleAssistantFileArtifactSummary(baselineIds);
+    if (fileArtifactSummary.count > 0 && !ui.stopVisible && ui.streamingCount === 0) {
+      log('assistant file artifact detected during stream wait', fileArtifactSummary);
+      break;
+    }
+
     if (Date.now() - waitStart > NO_PROGRESS_FAIL_MS && progress.firstProgressAt === null) {
       const domPreview = await sampleNewAssistantText(baselineIds);
-      if (!wsReady || ui.stopVisible || ui.streamingCount > 0 || domPreview) {
+      if (!wsReady || ui.stopVisible || ui.streamingCount > 0 || domPreview || fileArtifactSummary.count > 0) {
         log('stream unavailable, switching to dom fallback', {
           wsReady,
           stopVisible: ui.stopVisible,
           streamingCount: ui.streamingCount,
-          domPreview: domPreview.slice(0, 120)
+          domPreview: domPreview.slice(0, 120),
+          fileArtifactCount: fileArtifactSummary.count
         });
         break;
       }
@@ -1602,6 +2579,7 @@ try {
 
   let currentText = '';
   const eventTrace = [];
+  const protocolFileHints = [];
   for (const chunk of progress.encodedItems) {
     for (const part of chunk.split(/\\n\\n+/)) {
       const lines = part.split(/\\r?\\n/);
@@ -1620,6 +2598,26 @@ try {
         }
         try {
           const event = JSON.parse(line);
+          collectProtocolFileHints(event, 'event', protocolFileHints);
+          const aggregateResultCode = event && event.v && event.v.message && event.v.message.metadata && event.v.message.metadata.aggregate_result && event.v.message.metadata.aggregate_result.code;
+          if (aggregateResultCode) {
+            log('protocol aggregate result', {
+              messageId: event.v.message.id || '',
+              role: event.v.message.author && event.v.message.author.role || '',
+              status: event.v.message.status || '',
+              codePreview: String(aggregateResultCode).slice(0, 400)
+            });
+          }
+          const serializedEvent = JSON.stringify(event);
+          if (serializedEvent.includes('sandbox:/mnt/data/')) {
+            const message = (event && event.v && event.v.message) || event.message || {};
+            log('protocol sandbox link event', {
+              messageId: message.id || '',
+              role: message.author && message.author.role || '',
+              status: message.status || '',
+              preview: serializedEvent.slice(0, 500)
+            });
+          }
           const nextText = assistantText(event, currentText);
           if (nextText !== currentText) {
             currentText = nextText;
@@ -1638,20 +2636,36 @@ try {
             progress.messageStreamCompleteSeen = true;
           }
         } catch {
+          collectProtocolFileHints(line, 'raw', protocolFileHints);
           if (eventTrace.length < 120) eventTrace.push({ type: 'raw', preview: line.slice(0, 120) });
         }
       }
     }
   }
+  if (protocolFileHints.length > 0) {
+    log('protocol file hints', {
+      count: protocolFileHints.length,
+      hints: protocolFileHints.slice(0, 20)
+    });
+  }
+  const protocolSandboxPaths = extractSandboxPathsFromProtocolHints(protocolFileHints);
+  if (protocolSandboxPaths.length > 0) {
+    log('protocol sandbox paths', {
+      paths: protocolSandboxPaths.slice(0, 10)
+    });
+  }
 
   let domText = '';
   let lastChange = Date.now();
   const domStart = Date.now();
+  let lastFileArtifactTs = 0;
+  let domFileArtifactDetected = false;
   while (Date.now() - domStart < DOM_FALLBACK_WAIT_MS) {
     const ui = await sampleUiState();
     if (ui.dialogs.length > 0) {
       await dismissAnyDialog();
     }
+    const fileArtifactSummary = await sampleAssistantFileArtifactSummary(baselineIds);
     const next = await page.evaluate((baseline) => {
       const out = [];
       document.querySelectorAll('[data-message-author-role="assistant"]').forEach(n => {
@@ -1667,54 +2681,189 @@ try {
       domText = next;
       lastChange = Date.now();
     }
+    if (fileArtifactSummary.count > 0) {
+      if (!lastFileArtifactTs) lastFileArtifactTs = Date.now();
+      domFileArtifactDetected = true;
+      if (!ui.stopVisible && ui.streamingCount === 0) {
+        log('assistant file artifact detected during dom fallback', fileArtifactSummary);
+        break;
+      }
+    } else {
+      lastFileArtifactTs = 0;
+    }
     if ((progress.turnCompleteSeen || progress.doneSeen || progress.messageStreamCompleteSeen) && Date.now() - lastChange >= 3000) {
       break;
     }
     if (domText && Date.now() - lastChange >= DOM_STABLE_MS) {
       break;
     }
+    if (lastFileArtifactTs && Date.now() - lastFileArtifactTs >= 1500) {
+      break;
+    }
     await page.waitForTimeout(500, { timeout: 1500 }).catch(() => null);
   }
 
-  const reply = String(currentText || "").trim() || String(domText || "").trim();
-  const source = currentText ? "stream" : "dom_fallback";
+  const resolvedConversationId = progress.conversationId || extractSessionId(page.url()) || requestedSid || null;
+  let reply = String(currentText || "").trim() || String(domText || "").trim();
+  let source = currentText ? "stream" : "dom_fallback";
+
+  const conversationState = domFileArtifactDetected
+    ? null
+    : await pollConversationAssistantState(resolvedConversationId, 30000).catch(() => null);
+  const conversationReply = String(conversationState && conversationState.latest && conversationState.latest.text || '').trim();
+  if (conversationReply) {
+    const normalizedReply = normalizeText(reply);
+    const normalizedConversationReply = normalizeText(conversationReply);
+    const preferConversationReply = !reply
+      || normalizedConversationReply.length > normalizedReply.length + 40
+      || (normalizedReply && normalizedConversationReply.startsWith(normalizedReply))
+      || (/\|.+\|/.test(conversationReply) && conversationReply.length > reply.length);
+    if (preferConversationReply) {
+      log('conversation detail reply selected', {
+        previousSource: source,
+        previousLength: reply.length,
+        nextLength: conversationReply.length
+      });
+      reply = conversationReply;
+      source = 'conversation_detail';
+    }
+  }
+  const replyLooksFileLike = looksLikeFileArtifactText(reply);
 
   // Resolve images from WS stream pointers first; fallback to poll if needed
   let images = [];
   let imagesSource = null;
-  try {
-    let pointers = Array.isArray(progress.imagePointers) ? progress.imagePointers.slice() : [];
-    if ((!pointers || pointers.length === 0) && progress.conversationId) {
-      const polled = await pollConversationImages(progress.conversationId, 120000).catch(() => []);
-      if (Array.isArray(polled) && polled.length > 0) {
-        pointers = polled;
-        imagesSource = "poll";
+  if (!replyLooksFileLike) {
+    try {
+      let pointers = Array.isArray(progress.imagePointers) ? progress.imagePointers.slice() : [];
+      if ((!pointers || pointers.length === 0) && resolvedConversationId) {
+        const polled = await pollConversationImages(resolvedConversationId, 120000).catch(() => []);
+        if (Array.isArray(polled) && polled.length > 0) {
+          pointers = polled;
+          imagesSource = "poll";
+        }
+      } else if (pointers.length > 0) {
+        imagesSource = "stream";
       }
-    } else if (pointers.length > 0) {
-      imagesSource = "stream";
+      if (pointers.length > 0) {
+        images = await resolvePointers(pointers, resolvedConversationId).catch(() => []);
+      }
+    } catch (e) {
+      // do not break text path on image errors
     }
-    if (pointers.length > 0) {
-      images = await resolvePointers(pointers, progress.conversationId || requestedSid).catch(() => []);
-    }
-  } catch (e) {
-    // do not break text path on image errors
+  } else {
+    log('skip image resolution for file-like reply', { reply: reply.slice(0, 120) });
   }
 
-  if ((!images || images.length === 0)) {
+  if ((!images || images.length === 0) && !replyLooksFileLike) {
     const domImageCandidates = await collectDomImageCandidates().catch(() => []);
     if (domImageCandidates.length > 0) {
+      log('dom image candidates', {
+        count: domImageCandidates.length,
+        preview: domImageCandidates.slice(0, 4)
+      });
       const domImages = await resolveDomImages(domImageCandidates).catch(() => []);
       if (domImages.length > 0) {
         images = domImages;
         imagesSource = 'dom';
         log('dom images resolved', { count: domImages.length, preview: domImages[0] });
+      } else {
+        log('dom image resolution produced no files', {
+          count: domImageCandidates.length,
+          preview: domImageCandidates.slice(0, 4)
+        });
       }
     }
   }
 
-  if (!reply && images.length === 0) {
+  let files = [];
+  let visibleArtifacts = [];
+  const replyFileName = extractFileNameFromArtifact({ text: reply });
+  const preferredSandboxPath = protocolSandboxPaths.find(item => !replyFileName || fileNameFromSandboxPath(item) === replyFileName) || protocolSandboxPaths[0] || '';
+  try {
+    if (conversationState) {
+      files = await resolveAssistantFilesFromConversationState(resolvedConversationId, conversationState).catch(() => []);
+      if (files.length > 0) {
+        log('conversation files resolved', {
+          count: files.length,
+          preview: files.slice(0, 4)
+        });
+      }
+    }
+  } catch (e) {
+    log('resolve conversation files failed', {
+      error: e && e.message ? e.message : String(e || '')
+    });
+  }
+
+  if (files.length === 0 && replyLooksFileLike) {
+    visibleArtifacts = await inspectAssistantFileArtifacts().catch(() => []);
+    log('visible file artifacts', {
+      count: visibleArtifacts.length,
+      artifacts: visibleArtifacts.slice(0, 20)
+    });
+    if (visibleArtifacts.length > 0) {
+      const domFiles = await resolveDomFileArtifacts(visibleArtifacts).catch(() => []);
+      if (domFiles.length > 0) {
+        files = domFiles;
+        log('dom files resolved', {
+          count: files.length,
+          preview: files.slice(0, 4)
+        });
+      } else {
+        const detailedArtifacts = await inspectAssistantFileArtifactsDetailed().catch(() => []);
+        log('visible file artifacts detailed', {
+          count: detailedArtifacts.length,
+          artifacts: detailedArtifacts.slice(0, 10)
+        });
+        const probeTarget = detailedArtifacts.find(item => item.kind === 'button' || item.kind === 'a' || item.role === 'button') || detailedArtifacts[0] || null;
+        if (probeTarget) {
+          const probe = await probeDomFileArtifactDownload(probeTarget, 5000, {
+            fileName: replyFileName || extractFileNameFromArtifact(probeTarget),
+            sandboxPath: preferredSandboxPath
+          }).catch(() => ({ clicked: false, events: [], downloadUrl: '', fileName: '' }));
+          log('file artifact probe', {
+            clicked: probe.clicked,
+            downloadUrl: probe.downloadUrl,
+            fileName: probe.fileName,
+            events: (probe.events || []).slice(0, 20)
+          });
+          if (probe.downloadUrl) {
+            const probedFile = await downloadConversationFileArtifact(probe.downloadUrl, {
+              fileName: probe.fileName || probeTarget.download || probeTarget.text || probeTarget.aria || ''
+            }).catch(() => null);
+            if (probedFile) {
+              files = [{
+                ...probedFile,
+                id: '',
+                pointerType: 'dom-probe',
+                size: 0
+              }];
+              log('dom probe file resolved', {
+                preview: files[0]
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!reply && images.length === 0 && files.length === 0) {
+    const visibleImages = await inspectVisibleImages().catch(() => []);
+    visibleArtifacts = visibleArtifacts.length > 0 ? visibleArtifacts : await inspectAssistantFileArtifacts().catch(() => []);
+    log('empty reply visible images', { count: visibleImages.length, images: visibleImages.slice(0, 12) });
+    log('empty reply visible file artifacts', { count: visibleArtifacts.length, artifacts: visibleArtifacts.slice(0, 20) });
     const ui = await sampleUiState();
     throw new Error("EMPTY_REPLY:" + JSON.stringify(ui));
+  }
+
+  if (replyLooksFileLike && files.length === 0) {
+    throw new Error('FILE_ARTIFACT_NOT_CAPTURED:' + JSON.stringify({
+      reply,
+      conversationId: resolvedConversationId,
+      visibleArtifacts: (visibleArtifacts || []).slice(0, 20)
+    }));
   }
 
   return {
@@ -1727,6 +2876,8 @@ try {
     images,
     imagesSource,
     hasImages: Array.isArray(images) && images.length > 0,
+    files,
+    hasFiles: Array.isArray(files) && files.length > 0,
     toolInvoked: progress.toolInvoked,
     conversationId: progress.conversationId || extractSessionId(page.url()) || requestedSid || null,
     meta: {
@@ -1737,6 +2888,7 @@ try {
       activeTopicId: progress.activeTopicId,
       websocketOpenedCount: progress.websocketOpenedCount,
       encodedItemCount: progress.encodedItems.length,
+      protocolFileHints,
       totalMs: Date.now() - t0
     }
   };

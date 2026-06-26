@@ -75,12 +75,72 @@ const queueManager = createQueueManager(
     {
         initBrowser,
         executeTask,
+        resetPool: backend.resetPool,
         config,
         getCookies: backend.getCookies
             ? (workerName, domain) => backend.getCookies(workerName, domain)
             : null
     }
 );
+
+const fatalRecoveryState = {
+    inProgress: false,
+    recentTimestamps: []
+};
+
+function trimFatalRecoveryWindow(now = Date.now()) {
+    fatalRecoveryState.recentTimestamps = fatalRecoveryState.recentTimestamps.filter(ts => now - ts <= 60000);
+}
+
+function isBrowserRuntimeError(error) {
+    const text = [error?.message || '', error?.stack || ''].join('\n');
+    return /playwright-core|camoufox|ffnetworkmanager|browser has been closed|target page, context or browser has been closed|execution context was destroyed/i.test(text);
+}
+
+async function recoverFromFatalRuntime(source, error) {
+    const now = Date.now();
+    trimFatalRecoveryWindow(now);
+    fatalRecoveryState.recentTimestamps.push(now);
+
+    const browserRuntime = isBrowserRuntimeError(error);
+    logger.error('服务器', `捕获到未处理异常 (${source})`, {
+        error: error?.message || String(error || ''),
+        browserRuntime,
+        stack: error?.stack || ''
+    });
+
+    if (fatalRecoveryState.inProgress) {
+        logger.warn('服务器', '故障恢复已在进行中，忽略重复恢复请求');
+        return;
+    }
+
+    fatalRecoveryState.inProgress = true;
+    try {
+        await queueManager.recoverFromFatalRuntime(`服务运行时异常 (${source}): ${error?.message || 'unknown error'}`);
+        logger.warn('服务器', '已完成工作池重置与任务中止，服务将继续接收新请求');
+    } catch (recoverErr) {
+        logger.error('服务器', '故障恢复失败，将依赖 supervisor 重启', { error: recoverErr.message, stack: recoverErr.stack || '' });
+        process.exit(70);
+        return;
+    } finally {
+        fatalRecoveryState.inProgress = false;
+    }
+
+    trimFatalRecoveryWindow();
+    if (fatalRecoveryState.recentTimestamps.length >= 3) {
+        logger.error('服务器', '一分钟内连续发生多次未处理异常，主动退出以触发 supervisor 全量重启');
+        process.exit(70);
+    }
+}
+
+process.on('uncaughtException', (error) => {
+    void recoverFromFatalRuntime('uncaughtException', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+    const error = reason instanceof Error ? reason : new Error(String(reason || 'Unhandled rejection'));
+    void recoverFromFatalRuntime('unhandledRejection', error);
+});
 
 // ==================== 创建路由 ====================
 

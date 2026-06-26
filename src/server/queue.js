@@ -29,8 +29,9 @@ export function createQueueManager(queueConfig, callbacks) {
         workerMaxPending = 10,
         workerWaitTimeout = 300000
     } = queueConfig;
-    const { initBrowser, executeTask, config } = callbacks;
+    const { initBrowser, executeTask, resetPool, config } = callbacks;
     const effectiveQueueSize = queueBuffer === 0 ? Infinity : (maxConcurrent + queueBuffer);
+    const taskExecutionTimeout = config.queue?.taskExecutionTimeout ?? 420000;
 
     const queue = [];
     const processingTasks = [];
@@ -65,6 +66,42 @@ export function createQueueManager(queueConfig, callbacks) {
             durationMs: Math.max(0, durationMs || 0),
             page: page || { url: '', title: '' }
         };
+    }
+
+    function buildGenericPage() {
+        return { url: '', title: '' };
+    }
+
+    function abortTask(task, reasonMessage, status = 'failed') {
+        if (!task || task._aborted) return;
+        task._aborted = true;
+        const durationMs = task.enqueuedAt ? (Date.now() - task.enqueuedAt) : 0;
+        try {
+            updateRecord(task.id, {
+                status,
+                errorMessage: reasonMessage,
+                durationMs
+            });
+        } catch (e) {
+            logger.debug('服务器', `更新历史记录失败: ${e.message}`);
+        }
+
+        if (!task.res.writableEnded) {
+            const meta = buildMeta(task, {
+                workerId: task.workerId || null,
+                instanceId: null,
+                queuedMs: durationMs,
+                durationMs,
+                page: buildGenericPage()
+            });
+            if (task.res.writeHead) task.res.writeHead(502, { 'Content-Type': 'application/json' });
+            task.res.end(JSON.stringify(buildEnvelope({
+                ok: false,
+                message: reasonMessage,
+                meta,
+                trace: null
+            })));
+        }
     }
 
     async function processTask(task) {
@@ -106,20 +143,49 @@ export function createQueueManager(queueConfig, callbacks) {
             if (!poolContext) {
                 poolContext = await initBrowser(config);
             }
-            result = await executeTask(poolContext, {
-                adapterId: task.adapterId,
-                input: task.input,
-                fileOutput,
-                debug: !!debug,
-                workerId: workerId || null,
-                overrideScript: overrideScript || null,
-                requestId
-            }, { id: requestId });
+            let timeoutHandle = null;
+            try {
+                result = await Promise.race([
+                    executeTask(poolContext, {
+                        adapterId: task.adapterId,
+                        input: task.input,
+                        fileOutput,
+                        debug: !!debug,
+                        workerId: workerId || null,
+                        overrideScript: overrideScript || null,
+                        requestId
+                    }, { id: requestId }),
+                    new Promise((_, reject) => {
+                        timeoutHandle = setTimeout(() => {
+                            const err = new Error(`任务执行超时 (${taskExecutionTimeout}ms)`);
+                            err.code = 'TASK_EXECUTION_TIMEOUT';
+                            reject(err);
+                        }, taskExecutionTimeout);
+                    })
+                ]);
+            } finally {
+                if (timeoutHandle) clearTimeout(timeoutHandle);
+            }
         } catch (err) {
+            if (err.code === 'TASK_EXECUTION_TIMEOUT') {
+                logger.warn('服务器', '[队列] 任务执行超时，准备重置工作池', { id: requestId, adapterId: task.adapterId });
+                if (resetPool) {
+                    try {
+                        await resetPool(`task-timeout:${requestId}`);
+                    } catch (resetErr) {
+                        logger.error('服务器', '重置工作池失败', { error: resetErr.message, id: requestId });
+                    }
+                    poolContext = null;
+                }
+            }
             result = {
                 success: false,
                 error: { message: err.message || '执行异常', retryable: true }
             };
+        }
+
+        if (task._aborted) {
+            return;
         }
 
         const durationMs = Date.now() - startTime;
@@ -265,6 +331,27 @@ export function createQueueManager(queueConfig, callbacks) {
         return poolContext;
     }
 
+    async function resetPoolContext(reason = 'manual-reset') {
+        if (resetPool) {
+            await resetPool(reason);
+        }
+        poolContext = null;
+    }
+
+    async function recoverFromFatalRuntime(reasonMessage) {
+        const processingSnapshot = processingTasks.slice();
+        const queuedSnapshot = queue.splice(0, queue.length);
+
+        for (const task of queuedSnapshot) {
+            abortTask(task, reasonMessage);
+        }
+        for (const task of processingSnapshot) {
+            abortTask(task, reasonMessage);
+        }
+
+        await resetPoolContext(reasonMessage);
+    }
+
     return {
         addTask,
         getStatus,
@@ -272,8 +359,11 @@ export function createQueueManager(queueConfig, callbacks) {
         canAcceptNonStreaming,
         initializePool,
         getPoolContext,
+        resetPoolContext,
+        recoverFromFatalRuntime,
         maxQueueSize: effectiveQueueSize,
         workerMaxPending,
-        workerWaitTimeout
+        workerWaitTimeout,
+        taskExecutionTimeout
     };
 }
